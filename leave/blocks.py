@@ -10,7 +10,7 @@ CANCEL_ACTION = "cancel_request"
 
 
 def build_leave_modal(balances=None):
-    """The /leave request modal. If balances ({type: days_left}) is given, a
+    """The /dayoff request modal. If balances ({type: days_left}) is given, a
     context line at the top shows the remaining balance per leave type."""
     blocks = []
 
