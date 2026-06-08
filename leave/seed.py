@@ -38,13 +38,15 @@ def upsert_employee(conn, slack_user_id, real_name, manager_id=None, allowances=
 
 # Proxy employees for local testing. U_BOSS has no manager (top of chain).
 PROXY_EMPLOYEES = [
-    ("U_BOSS", "Boss Lady", None),
-    ("U_ALICE", "Alice Employee", "U_BOSS"),
-    ("U_BOB", "Bob Employee", "U_BOSS"),
+    ("U_EXAMPLE_OWNER", "Owner", None),
+    ("U_EXAMPLE_MEMBER", "Member", "U_EXAMPLE_OWNER"),
 ]
 
 
 def main():
+    from dotenv import load_dotenv
+
+    load_dotenv()
     with db.connect() as conn:
         apply_schema(conn)
         for slack_user_id, real_name, manager_id in PROXY_EMPLOYEES:
