@@ -74,6 +74,13 @@ def set_calendar_event_id(conn, request_id, event_id):
     )
 
 
+def set_ticket_ref(conn, request_id, channel, ts):
+    conn.execute(
+        "UPDATE requests SET ticket_channel=%s, ticket_ts=%s WHERE id=%s",
+        (channel, ts, request_id),
+    )
+
+
 def cancellable_requests(conn, employee_id, today):
     """The employee's requests that can still be cancelled: any pending one, or
     an approved one that hasn't started yet."""

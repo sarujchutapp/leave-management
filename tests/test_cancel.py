@@ -68,6 +68,21 @@ def test_cancel_pending(conn):
     assert calendar.deleted == []  # nothing on the calendar for a pending request
 
 
+def test_cancel_pending_withdraws_manager_ticket(conn):
+    _people(conn)
+    rid = create_request(conn, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+    conn.execute("UPDATE requests SET ticket_channel='D1', ticket_ts='9.9' WHERE id=%s", (rid,))
+    client = FakeSlackClient()
+
+    _cancel(conn, rid, "U_ALICE", client=client)
+
+    assert _status(conn, rid) == "cancelled"
+    # the manager's open ticket is edited in place (buttons removed)
+    assert len(client.chat_update_calls) == 1
+    assert client.chat_update_calls[0]["channel"] == "D1"
+    assert client.chat_update_calls[0]["ts"] == "9.9"
+
+
 def test_cancel_approved_before_start_deletes_event_and_notifies_manager(conn):
     _people(conn)
     rid = _approved_future(conn)
