@@ -9,7 +9,7 @@ from datetime import date
 
 from leave.blocks import (
     LEAVE_TYPES,
-    build_cancel_list,
+    build_cancel_modal,
     build_decision_notice,
     build_decline_modal,
     build_leave_modal,
@@ -189,7 +189,7 @@ def handle_decline_submit(ack, body, view, client, conn):
     _notify(client, employee["slack_user_id"], text)
 
 
-def open_cancel_list(ack, body, conn, today=None):
+def open_cancel_modal(ack, body, client, conn, today=None):
     today = today or date.today()
     employee = get_employee(conn, body["user_id"])
     if employee is None:
@@ -199,13 +199,14 @@ def open_cancel_list(ack, body, conn, today=None):
     if not rows:
         ack(NOTHING_TO_CANCEL)
         return
-    ack(blocks=build_cancel_list(rows))
+    ack()
+    client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows))
 
 
-def handle_cancel(ack, body, client, conn, calendar, today=None):
+def submit_cancel(ack, body, view, client, conn, calendar, today=None):
     ack()
     today = today or date.today()
-    request_id = int(body["actions"][0]["value"])
+    request_id = int(view["state"]["values"]["request"]["value"]["selected_option"]["value"])
     request = get_request(conn, request_id)
 
     if body["user"]["id"] != request["employee_id"]:
