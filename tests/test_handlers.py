@@ -107,6 +107,31 @@ def test_submit_auto_approves_when_no_manager(conn):
     assert row["calendar_event_id"] == calendar.created[0]["id"]
 
 
+def test_submit_converts_buddhist_era_dates(conn):
+    # Thai-locale Slack date pickers send Buddhist-era years (CE + 543).
+    upsert_employee(conn, "U_SOLO", "Solo", None)
+    calendar = FakeCalendar()
+    view = make_leave_view("vacation", "2569-06-10", "2569-06-11")  # = 2026-06-10/11
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=FakeSlackClient(),
+        conn=conn,
+        calendar=calendar,
+        today=TODAY,
+    )
+
+    row = conn.execute(
+        "SELECT start_date, end_date FROM requests WHERE employee_id='U_SOLO'"
+    ).fetchone()
+    assert row["start_date"] == date(2026, 6, 10)
+    assert row["end_date"] == date(2026, 6, 11)
+    # the calendar event uses the converted (Gregorian) date too
+    assert calendar.created[0]["start"] == date(2026, 6, 10)
+
+
 def test_submit_invalid_acks_errors_and_persists_nothing(conn):
     upsert_employee(conn, "U_BOSS", "Boss", None)
     upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
