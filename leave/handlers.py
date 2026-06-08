@@ -61,6 +61,16 @@ def submit_leave(ack, body, view, client, conn, today=None):
     request_id = create_request(conn, employee["slack_user_id"], leave_type, start, end, reason)
     ack()
 
+    # Top of chain: no manager to approve, so auto-approve.
+    if employee["manager_id"] is None:
+        approve_request(conn, request_id)
+        _notify(
+            client,
+            employee["slack_user_id"],
+            f"Your {leave_type} leave {start} → {end} was auto-approved.",
+        )
+        return
+
     remaining = remaining_balance(conn, employee, leave_type, today)
     blocks = build_ticket(
         request_id, employee["real_name"], leave_type, start, end, reason, remaining

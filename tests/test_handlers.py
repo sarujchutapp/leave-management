@@ -68,6 +68,24 @@ def test_submit_valid_persists_pending_and_dms_manager(conn):
     assert client.chat_postMessage_calls[0]["channel"] == "U_BOSS"
 
 
+def test_submit_auto_approves_when_no_manager(conn):
+    upsert_employee(conn, "U_SOLO", "Solo", None)  # no manager
+    ack = FakeAck()
+    client = FakeSlackClient()
+    view = make_leave_view("vacation", "2026-06-10", "2026-06-11")
+
+    submit_leave(
+        ack=ack, body={"user": {"id": "U_SOLO"}}, view=view, client=client, conn=conn, today=TODAY
+    )
+
+    row = conn.execute("SELECT status FROM requests WHERE employee_id='U_SOLO'").fetchone()
+    assert row["status"] == "approved"
+    # notified themselves; no approval ticket routed to anyone else
+    assert len(client.chat_postMessage_calls) == 1
+    assert client.chat_postMessage_calls[0]["channel"] == "U_SOLO"
+    assert "blocks" not in client.chat_postMessage_calls[0]
+
+
 def test_submit_invalid_acks_errors_and_persists_nothing(conn):
     upsert_employee(conn, "U_BOSS", "Boss", None)
     upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
