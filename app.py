@@ -49,7 +49,8 @@ def build_app():
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):
-        handle_decline_click(ack, body, client)
+        with db.connect() as conn:
+            handle_decline_click(ack, body, client, conn)
 
     @app.view(DECLINE_CALLBACK_ID)
     def _decline_submit(ack, body, view, client):

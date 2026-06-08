@@ -108,6 +108,26 @@ def _notify(client, employee_id, text):
     client.chat_postMessage(channel=employee_id, text=text)
 
 
+def _close_stale_ticket(client, channel, ts, request):
+    """A decision was attempted on a request that is no longer pending (it was
+    cancelled, or already decided). Replace the ticket so its buttons vanish."""
+    client.chat_update(
+        channel=channel,
+        ts=ts,
+        text="No longer actionable",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"This request is no longer pending — it was {request['status']}. "
+                    "No action taken.",
+                },
+            }
+        ],
+    )
+
+
 def handle_approve(ack, body, client, conn, calendar):
     ack()
     request_id = int(body["actions"][0]["value"])
@@ -116,6 +136,9 @@ def handle_approve(ack, body, client, conn, calendar):
 
     if body["user"]["id"] != employee["manager_id"]:
         _notify(client, body["user"]["id"], NOT_APPROVER)
+        return
+    if request["status"] != "pending":
+        _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
         return
 
     _finalize_approval(
@@ -146,8 +169,13 @@ def handle_approve(ack, body, client, conn, calendar):
     )
 
 
-def handle_decline_click(ack, body, client):
+def handle_decline_click(ack, body, client, conn):
     ack()
+    request_id = int(body["actions"][0]["value"])
+    request = get_request(conn, request_id)
+    if request["status"] != "pending":
+        _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
+        return
     meta = json.dumps(
         {
             "request_id": body["actions"][0]["value"],
@@ -167,6 +195,9 @@ def handle_decline_submit(ack, body, view, client, conn):
     request = get_request(conn, request_id)
     employee = get_employee(conn, request["employee_id"])
     if body["user"]["id"] != employee["manager_id"]:
+        return
+    if request["status"] != "pending":
+        _close_stale_ticket(client, meta["channel"], meta["ts"], request)
         return
 
     decline_request(conn, request_id, reason)
@@ -229,4 +260,4 @@ def submit_cancel(ack, body, view, client, conn, calendar, today=None):
                 f"leave {request['start_date']} → {request['end_date']}.",
             )
 
-    _notify(client, body["user"]["id"], "Your request was cancelled.")
+    _notify(client, body["user"]["id"], "Cancelled successfully.")
