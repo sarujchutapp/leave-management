@@ -32,7 +32,7 @@ def build_app():
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
     calendar = CalendarClient.from_env()
 
-    @app.command("/leave")
+    @app.command("/dayoff")
     def _open(ack, body, client):
         with db.connect() as conn:
             open_leave_modal(ack, body, client, conn)
@@ -56,7 +56,7 @@ def build_app():
         with db.connect() as conn:
             handle_decline_submit(ack, body, view, client, conn)
 
-    @app.command("/leave-cancel")
+    @app.command("/dayoff-cancel")
     def _cancel_list(ack, body):
         with db.connect() as conn:
             open_cancel_list(ack, body, conn)
