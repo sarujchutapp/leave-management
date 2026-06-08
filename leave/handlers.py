@@ -46,11 +46,19 @@ def open_leave_modal(ack, body, client, conn, today=None):
     client.views_open(trigger_id=body["trigger_id"], view=build_leave_modal(balances))
 
 
+def _to_gregorian(d):
+    """Slack's date picker sends Buddhist-era years (CE + 543) in Thai locale.
+    Convert those back to the Gregorian calendar."""
+    if d.year >= 2400:
+        return d.replace(year=d.year - 543)
+    return d
+
+
 def _parse_submission(view):
     values = view["state"]["values"]
     leave_type = values["leave_type"]["value"]["selected_option"]["value"]
-    start = date.fromisoformat(values["start_date"]["value"]["selected_date"])
-    end = date.fromisoformat(values["end_date"]["value"]["selected_date"])
+    start = _to_gregorian(date.fromisoformat(values["start_date"]["value"]["selected_date"]))
+    end = _to_gregorian(date.fromisoformat(values["end_date"]["value"]["selected_date"]))
     reason = values["reason"]["value"].get("value")
     return leave_type, start, end, reason
 
