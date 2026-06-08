@@ -5,15 +5,22 @@ LEAVE_TYPES = ["sick", "vacation", "personal"]
 LEAVE_CALLBACK_ID = "leave_submit"
 
 
-def build_leave_modal():
-    """The /leave request modal: type, start/end date pickers, optional reason."""
-    return {
-        "type": "modal",
-        "callback_id": LEAVE_CALLBACK_ID,
-        "title": {"type": "plain_text", "text": "Request Leave"},
-        "submit": {"type": "plain_text", "text": "Submit"},
-        "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
+def build_leave_modal(balances=None):
+    """The /leave request modal. If balances ({type: days_left}) is given, a
+    context line at the top shows the remaining balance per leave type."""
+    blocks = []
+
+    if balances:
+        summary = "   ·   ".join(f"*{t}*: {balances[t]}" for t in LEAVE_TYPES)
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"Days left — {summary}"}],
+            }
+        )
+
+    blocks.extend(
+        [
             {
                 "type": "input",
                 "block_id": "leave_type",
@@ -50,5 +57,14 @@ def build_leave_modal():
                     "multiline": True,
                 },
             },
-        ],
+        ]
+    )
+
+    return {
+        "type": "modal",
+        "callback_id": LEAVE_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Request Leave"},
+        "submit": {"type": "plain_text", "text": "Submit"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
     }
