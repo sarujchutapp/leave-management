@@ -3,7 +3,7 @@ from datetime import date
 from leave.blocks import LEAVE_CALLBACK_ID, LEAVE_TYPES
 from leave.handlers import CONTACT_ADMIN, open_leave_modal, submit_leave
 from leave.seed import upsert_employee
-from tests.fakes import FakeAck, FakeSlackClient, make_leave_view
+from tests.fakes import FakeAck, FakeCalendar, FakeSlackClient, make_leave_view
 
 TODAY = date(2026, 6, 8)
 
@@ -53,10 +53,17 @@ def test_submit_valid_persists_pending_and_dms_manager(conn):
     upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
     ack = FakeAck()
     client = FakeSlackClient()
+    calendar = FakeCalendar()
     view = make_leave_view("vacation", "2026-06-10", "2026-06-11", "trip")
 
     submit_leave(
-        ack=ack, body={"user": {"id": "U_ALICE"}}, view=view, client=client, conn=conn, today=TODAY
+        ack=ack,
+        body={"user": {"id": "U_ALICE"}},
+        view=view,
+        client=client,
+        conn=conn,
+        calendar=calendar,
+        today=TODAY,
     )
 
     assert ack.called and ack.response is None
@@ -66,24 +73,38 @@ def test_submit_valid_persists_pending_and_dms_manager(conn):
     # ticket DM'd to the manager
     assert len(client.chat_postMessage_calls) == 1
     assert client.chat_postMessage_calls[0]["channel"] == "U_BOSS"
+    # pending request -> no calendar event
+    assert calendar.created == []
 
 
 def test_submit_auto_approves_when_no_manager(conn):
     upsert_employee(conn, "U_SOLO", "Solo", None)  # no manager
     ack = FakeAck()
     client = FakeSlackClient()
+    calendar = FakeCalendar()
     view = make_leave_view("vacation", "2026-06-10", "2026-06-11")
 
     submit_leave(
-        ack=ack, body={"user": {"id": "U_SOLO"}}, view=view, client=client, conn=conn, today=TODAY
+        ack=ack,
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=client,
+        conn=conn,
+        calendar=calendar,
+        today=TODAY,
     )
 
-    row = conn.execute("SELECT status FROM requests WHERE employee_id='U_SOLO'").fetchone()
+    row = conn.execute(
+        "SELECT status, calendar_event_id FROM requests WHERE employee_id='U_SOLO'"
+    ).fetchone()
     assert row["status"] == "approved"
     # notified themselves; no approval ticket routed to anyone else
     assert len(client.chat_postMessage_calls) == 1
     assert client.chat_postMessage_calls[0]["channel"] == "U_SOLO"
     assert "blocks" not in client.chat_postMessage_calls[0]
+    # auto-approval created a calendar event and stored its id
+    assert len(calendar.created) == 1
+    assert row["calendar_event_id"] == calendar.created[0]["id"]
 
 
 def test_submit_invalid_acks_errors_and_persists_nothing(conn):
@@ -91,10 +112,17 @@ def test_submit_invalid_acks_errors_and_persists_nothing(conn):
     upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
     ack = FakeAck()
     client = FakeSlackClient()
+    calendar = FakeCalendar()
     view = make_leave_view("vacation", "2026-06-12", "2026-06-10")  # end before start
 
     submit_leave(
-        ack=ack, body={"user": {"id": "U_ALICE"}}, view=view, client=client, conn=conn, today=TODAY
+        ack=ack,
+        body={"user": {"id": "U_ALICE"}},
+        view=view,
+        client=client,
+        conn=conn,
+        calendar=calendar,
+        today=TODAY,
     )
 
     assert ack.response["response_action"] == "errors"
@@ -102,3 +130,4 @@ def test_submit_invalid_acks_errors_and_persists_nothing(conn):
     count = conn.execute("SELECT count(*) AS n FROM requests").fetchone()["n"]
     assert count == 0
     assert client.chat_postMessage_calls == []
+    assert calendar.created == []

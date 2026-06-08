@@ -21,6 +21,7 @@ from leave.requests import (
     decline_request,
     get_request,
     remaining_balance,
+    set_calendar_event_id,
 )
 from leave.validation import validate_request
 
@@ -48,7 +49,14 @@ def _parse_submission(view):
     return leave_type, start, end, reason
 
 
-def submit_leave(ack, body, view, client, conn, today=None):
+def _finalize_approval(conn, calendar, request_id, employee, leave_type, start, end):
+    """Mark approved and create the shared-calendar event, storing its id."""
+    approve_request(conn, request_id)
+    event_id = calendar.create_event(f"{employee['real_name']} — {leave_type}", start, end)
+    set_calendar_event_id(conn, request_id, event_id)
+
+
+def submit_leave(ack, body, view, client, conn, calendar, today=None):
     today = today or date.today()
     employee = get_employee(conn, body["user"]["id"])
     leave_type, start, end, reason = _parse_submission(view)
@@ -63,7 +71,7 @@ def submit_leave(ack, body, view, client, conn, today=None):
 
     # Top of chain: no manager to approve, so auto-approve.
     if employee["manager_id"] is None:
-        approve_request(conn, request_id)
+        _finalize_approval(conn, calendar, request_id, employee, leave_type, start, end)
         _notify(
             client,
             employee["slack_user_id"],
@@ -86,7 +94,7 @@ def _notify(client, employee_id, text):
     client.chat_postMessage(channel=employee_id, text=text)
 
 
-def handle_approve(ack, body, client, conn):
+def handle_approve(ack, body, client, conn, calendar):
     ack()
     request_id = int(body["actions"][0]["value"])
     request = get_request(conn, request_id)
@@ -96,7 +104,15 @@ def handle_approve(ack, body, client, conn):
         _notify(client, body["user"]["id"], NOT_APPROVER)
         return
 
-    approve_request(conn, request_id)
+    _finalize_approval(
+        conn,
+        calendar,
+        request_id,
+        employee,
+        request["leave_type"],
+        request["start_date"],
+        request["end_date"],
+    )
     client.chat_update(
         channel=body["channel"]["id"],
         ts=body["message"]["ts"],
