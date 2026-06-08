@@ -10,18 +10,18 @@ from leave import db
 from leave.calendar_client import CalendarClient
 from leave.blocks import (
     APPROVE_ACTION,
-    CANCEL_ACTION,
+    CANCEL_CALLBACK_ID,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
     LEAVE_CALLBACK_ID,
 )
 from leave.handlers import (
     handle_approve,
-    handle_cancel,
     handle_decline_click,
     handle_decline_submit,
-    open_cancel_list,
+    open_cancel_modal,
     open_leave_modal,
+    submit_cancel,
     submit_leave,
 )
 
@@ -58,14 +58,14 @@ def build_app():
             handle_decline_submit(ack, body, view, client, conn)
 
     @app.command("/dayoff-cancel")
-    def _open_cancel(ack, body):
+    def _open_cancel(ack, body, client):
         with db.connect() as conn:
-            open_cancel_list(ack, body, conn)
+            open_cancel_modal(ack, body, client, conn)
 
-    @app.action(CANCEL_ACTION)
-    def _cancel(ack, body, client, respond):
+    @app.view(CANCEL_CALLBACK_ID)
+    def _submit_cancel(ack, body, view, client):
         with db.connect() as conn:
-            handle_cancel(ack, body, client, conn, calendar, respond)
+            submit_cancel(ack, body, view, client, conn, calendar)
 
     return app
 

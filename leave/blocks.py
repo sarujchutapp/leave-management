@@ -6,7 +6,7 @@ LEAVE_CALLBACK_ID = "leave_submit"
 APPROVE_ACTION = "approve_request"
 DECLINE_ACTION = "decline_request"
 DECLINE_CALLBACK_ID = "decline_submit"
-CANCEL_ACTION = "cancel_request"
+CANCEL_CALLBACK_ID = "cancel_submit"
 
 
 def build_leave_modal(balances=None):
@@ -140,22 +140,31 @@ def build_decision_notice(employee_name, leave_type, start, end, decision, reaso
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
-def build_cancel_list(rows):
-    """A row per cancellable request, each with its own one-click Cancel button."""
-    return [
+def build_cancel_modal(rows):
+    """Modal showing the cancellable requests as radio options laid out directly
+    on the modal (no dropdown to expand)."""
+    options = [
         {
-            "type": "section",
             "text": {
-                "type": "mrkdwn",
-                "text": f"*{r['leave_type']}*  {r['start_date']} → {r['end_date']}  ({r['status']})",
+                "type": "plain_text",
+                "text": f"{r['leave_type']} · {r['start_date']} → {r['end_date']} ({r['status']})"[:75],
             },
-            "accessory": {
-                "type": "button",
-                "action_id": CANCEL_ACTION,
-                "style": "danger",
-                "text": {"type": "plain_text", "text": "Cancel"},
-                "value": str(r["id"]),
-            },
+            "value": str(r["id"]),
         }
         for r in rows
     ]
+    return {
+        "type": "modal",
+        "callback_id": CANCEL_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Cancel Leave"},
+        "submit": {"type": "plain_text", "text": "Cancel leave"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "request",
+                "label": {"type": "plain_text", "text": "Which request?"},
+                "element": {"type": "radio_buttons", "action_id": "value", "options": options},
+            }
+        ],
+    }
