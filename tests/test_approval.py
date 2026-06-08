@@ -71,7 +71,10 @@ def test_decline_click_opens_modal_with_metadata(conn):
     client = FakeSlackClient()
 
     handle_decline_click(
-        ack=FakeAck(), body=make_action_body(rid, "U_BOSS", channel="C9", ts="222.2"), client=client
+        ack=FakeAck(),
+        body=make_action_body(rid, "U_BOSS", channel="C9", ts="222.2"),
+        client=client,
+        conn=conn,
     )
 
     assert len(client.views_open_calls) == 1
@@ -97,6 +100,48 @@ def test_decline_submit_sets_status_and_notifies_with_reason(conn):
     notice = client.chat_postMessage_calls[0]
     assert notice["channel"] == "U_ALICE"
     assert "too busy" in notice["text"]
+
+
+def test_cannot_approve_cancelled_request(conn):
+    rid = _setup(conn)
+    conn.execute("UPDATE requests SET status='cancelled' WHERE id=%s", (rid,))
+    client, calendar = FakeSlackClient(), FakeCalendar()
+
+    handle_approve(
+        ack=FakeAck(), body=make_action_body(rid, "U_BOSS"), client=client, conn=conn, calendar=calendar
+    )
+
+    assert _status(conn, rid) == "cancelled"  # not flipped back to approved
+    assert calendar.created == []  # no calendar event
+    assert client.chat_postMessage_calls == []  # employee not notified
+    assert len(client.chat_update_calls) == 1  # stale ticket closed
+
+
+def test_cannot_double_approve(conn):
+    rid = _setup(conn)
+    calendar = FakeCalendar()
+    body = make_action_body(rid, "U_BOSS")
+
+    handle_approve(ack=FakeAck(), body=body, client=FakeSlackClient(), conn=conn, calendar=calendar)
+    handle_approve(ack=FakeAck(), body=body, client=FakeSlackClient(), conn=conn, calendar=calendar)
+
+    assert _status(conn, rid) == "approved"
+    assert len(calendar.created) == 1  # second click creates no second event
+
+
+def test_cannot_decline_cancelled_request(conn):
+    rid = _setup(conn)
+    conn.execute("UPDATE requests SET status='cancelled' WHERE id=%s", (rid,))
+    client = FakeSlackClient()
+    meta = json.dumps({"request_id": str(rid), "channel": "C9", "ts": "222.2"})
+
+    handle_decline_submit(
+        ack=FakeAck(), body={"user": {"id": "U_BOSS"}}, view=make_decline_view(meta, "no"),
+        client=client, conn=conn,
+    )
+
+    assert _status(conn, rid) == "cancelled"  # not flipped to declined
+    assert len(client.chat_update_calls) == 1  # stale ticket closed
 
 
 def test_non_manager_cannot_decline(conn):
