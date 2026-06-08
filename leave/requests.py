@@ -72,3 +72,27 @@ def set_calendar_event_id(conn, request_id, event_id):
     conn.execute(
         "UPDATE requests SET calendar_event_id=%s WHERE id=%s", (event_id, request_id)
     )
+
+
+def cancellable_requests(conn, employee_id, today):
+    """The employee's requests that can still be cancelled: any pending one, or
+    an approved one that hasn't started yet."""
+    return conn.execute(
+        """SELECT id, leave_type, start_date, end_date, status FROM requests
+           WHERE employee_id = %s
+             AND (status = 'pending' OR (status = 'approved' AND start_date > %s))
+           ORDER BY start_date""",
+        (employee_id, today),
+    ).fetchall()
+
+
+def can_cancel(request, today):
+    if request["status"] == "pending":
+        return True
+    return request["status"] == "approved" and request["start_date"] > today
+
+
+def cancel_request(conn, request_id):
+    conn.execute(
+        "UPDATE requests SET status='cancelled', updated_at=now() WHERE id=%s", (request_id,)
+    )
