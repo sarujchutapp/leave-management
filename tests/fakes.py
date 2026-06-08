@@ -26,14 +26,12 @@ def make_action_body(value, user_id, channel="C1", ts="111.1", trigger_id="T"):
     }
 
 
-class FakeRespond:
-    """Stand-in for Bolt's `respond` (writes to a message's response_url)."""
-
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, **kwargs):
-        self.calls.append(kwargs)
+def make_cancel_view(request_id):
+    return {
+        "state": {
+            "values": {"request": {"value": {"selected_option": {"value": str(request_id)}}}}
+        }
+    }
 
 
 def make_decline_view(private_metadata, reason=None):
