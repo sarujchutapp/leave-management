@@ -5,7 +5,9 @@ One-time provisioning of the three external resources, then a smoke check. All s
 ## 1. Slack app
 
 1. Go to https://api.slack.com/apps → **Create New App** → From scratch. Pick your personal test workspace.
-2. **Slash Commands** → Create New Command: command `/leave`, any request URL placeholder (Socket Mode ignores it), short description.
+2. **Slash Commands** → Create New Command for each, any request URL placeholder (Socket Mode ignores it):
+   - `/leave` — request leave
+   - `/leave-cancel` — cancel a pending or upcoming-approved request
 3. **Socket Mode** → toggle on. When prompted, generate an **App-Level Token** with scope `connections:write` → copy it (`xapp-...`) into `SLACK_APP_TOKEN`.
 4. **Interactivity & Shortcuts** → toggle on (URL is ignored under Socket Mode).
 5. **OAuth & Permissions** → Bot Token Scopes → add `chat:write` and `commands`. (Modals and DMs are covered by these.)

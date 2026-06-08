@@ -9,6 +9,7 @@ from datetime import date
 
 from leave.blocks import (
     LEAVE_TYPES,
+    build_cancel_list,
     build_decision_notice,
     build_decline_modal,
     build_leave_modal,
@@ -17,6 +18,9 @@ from leave.blocks import (
 from leave.db import get_employee
 from leave.requests import (
     approve_request,
+    can_cancel,
+    cancel_request,
+    cancellable_requests,
     create_request,
     decline_request,
     get_request,
@@ -27,6 +31,8 @@ from leave.validation import validate_request
 
 CONTACT_ADMIN = "You're not set up in the leave system yet — please contact your admin."
 NOT_APPROVER = "You're not the approver for this request."
+NOTHING_TO_CANCEL = "You have no requests to cancel."
+CANNOT_CANCEL = "That request can no longer be cancelled."
 
 
 def open_leave_modal(ack, body, client, conn, today=None):
@@ -173,3 +179,45 @@ def handle_decline_submit(ack, body, view, client, conn):
     if reason:
         text += f" Reason: {reason}"
     _notify(client, employee["slack_user_id"], text)
+
+
+def open_cancel_list(ack, body, conn, today=None):
+    today = today or date.today()
+    employee = get_employee(conn, body["user_id"])
+    if employee is None:
+        ack(CONTACT_ADMIN)
+        return
+    rows = cancellable_requests(conn, employee["slack_user_id"], today)
+    if not rows:
+        ack(NOTHING_TO_CANCEL)
+        return
+    ack(blocks=build_cancel_list(rows))
+
+
+def handle_cancel(ack, body, client, conn, calendar, today=None):
+    ack()
+    today = today or date.today()
+    request_id = int(body["actions"][0]["value"])
+    request = get_request(conn, request_id)
+
+    if body["user"]["id"] != request["employee_id"]:
+        return
+    if not can_cancel(request, today):
+        _notify(client, body["user"]["id"], CANNOT_CANCEL)
+        return
+
+    was_approved = request["status"] == "approved"
+    cancel_request(conn, request_id)
+
+    if was_approved and request["calendar_event_id"]:
+        calendar.delete_event(request["calendar_event_id"])
+        employee = get_employee(conn, request["employee_id"])
+        if employee["manager_id"]:
+            _notify(
+                client,
+                employee["manager_id"],
+                f"FYI: {employee['real_name']} cancelled their {request['leave_type']} "
+                f"leave {request['start_date']} → {request['end_date']}.",
+            )
+
+    _notify(client, body["user"]["id"], "Your request was cancelled.")
