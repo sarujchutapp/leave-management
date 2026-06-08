@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from leave import db
 from leave.blocks import LEAVE_CALLBACK_ID
 from leave.handlers import open_leave_modal, submit_leave
 
@@ -14,8 +15,16 @@ load_dotenv()
 
 def build_app():
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
-    app.command("/leave")(open_leave_modal)
-    app.view(LEAVE_CALLBACK_ID)(submit_leave)
+
+    @app.command("/leave")
+    def _open(ack, body, client):
+        with db.connect() as conn:
+            open_leave_modal(ack, body, client, conn)
+
+    @app.view(LEAVE_CALLBACK_ID)
+    def _submit(ack, view, logger):
+        submit_leave(ack, view, logger)
+
     return app
 
 
