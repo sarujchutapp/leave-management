@@ -22,8 +22,9 @@ def build_app():
             open_leave_modal(ack, body, client, conn)
 
     @app.view(LEAVE_CALLBACK_ID)
-    def _submit(ack, view, logger):
-        submit_leave(ack, view, logger)
+    def _submit(ack, body, view):
+        with db.connect() as conn:
+            submit_leave(ack, body, view, conn)
 
     return app
 
