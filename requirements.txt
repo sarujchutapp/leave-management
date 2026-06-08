@@ -1,0 +1,5 @@
+slack-sdk
+psycopg[binary]
+google-api-python-client
+google-auth
+python-dotenv
