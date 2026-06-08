@@ -48,28 +48,39 @@ def test_unregistered_user_gets_contact_admin(conn):
     assert client.views_open_calls == []
 
 
-def test_submit_valid_persists_pending(conn):
-    upsert_employee(conn, "U_ALICE", "Alice", None)
+def test_submit_valid_persists_pending_and_dms_manager(conn):
+    upsert_employee(conn, "U_BOSS", "Boss", None)
+    upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
     ack = FakeAck()
+    client = FakeSlackClient()
     view = make_leave_view("vacation", "2026-06-10", "2026-06-11", "trip")
 
-    submit_leave(ack=ack, body={"user": {"id": "U_ALICE"}}, view=view, conn=conn, today=TODAY)
+    submit_leave(
+        ack=ack, body={"user": {"id": "U_ALICE"}}, view=view, client=client, conn=conn, today=TODAY
+    )
 
     assert ack.called and ack.response is None
     row = conn.execute("SELECT status, reason FROM requests WHERE employee_id='U_ALICE'").fetchone()
     assert row["status"] == "pending"
     assert row["reason"] == "trip"
+    # ticket DM'd to the manager
+    assert len(client.chat_postMessage_calls) == 1
+    assert client.chat_postMessage_calls[0]["channel"] == "U_BOSS"
 
 
 def test_submit_invalid_acks_errors_and_persists_nothing(conn):
-    upsert_employee(conn, "U_ALICE", "Alice", None)
+    upsert_employee(conn, "U_BOSS", "Boss", None)
+    upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
     ack = FakeAck()
-    # end before start
-    view = make_leave_view("vacation", "2026-06-12", "2026-06-10")
+    client = FakeSlackClient()
+    view = make_leave_view("vacation", "2026-06-12", "2026-06-10")  # end before start
 
-    submit_leave(ack=ack, body={"user": {"id": "U_ALICE"}}, view=view, conn=conn, today=TODAY)
+    submit_leave(
+        ack=ack, body={"user": {"id": "U_ALICE"}}, view=view, client=client, conn=conn, today=TODAY
+    )
 
     assert ack.response["response_action"] == "errors"
     assert "end_date" in ack.response["errors"]
     count = conn.execute("SELECT count(*) AS n FROM requests").fetchone()["n"]
     assert count == 0
+    assert client.chat_postMessage_calls == []

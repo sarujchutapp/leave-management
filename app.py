@@ -7,8 +7,19 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from leave import db
-from leave.blocks import LEAVE_CALLBACK_ID
-from leave.handlers import open_leave_modal, submit_leave
+from leave.blocks import (
+    APPROVE_ACTION,
+    DECLINE_ACTION,
+    DECLINE_CALLBACK_ID,
+    LEAVE_CALLBACK_ID,
+)
+from leave.handlers import (
+    handle_approve,
+    handle_decline_click,
+    handle_decline_submit,
+    open_leave_modal,
+    submit_leave,
+)
 
 load_dotenv()
 
@@ -22,9 +33,23 @@ def build_app():
             open_leave_modal(ack, body, client, conn)
 
     @app.view(LEAVE_CALLBACK_ID)
-    def _submit(ack, body, view):
+    def _submit(ack, body, view, client):
         with db.connect() as conn:
-            submit_leave(ack, body, view, conn)
+            submit_leave(ack, body, view, client, conn)
+
+    @app.action(APPROVE_ACTION)
+    def _approve(ack, body, client):
+        with db.connect() as conn:
+            handle_approve(ack, body, client, conn)
+
+    @app.action(DECLINE_ACTION)
+    def _decline_click(ack, body, client):
+        handle_decline_click(ack, body, client)
+
+    @app.view(DECLINE_CALLBACK_ID)
+    def _decline_submit(ack, body, view, client):
+        with db.connect() as conn:
+            handle_decline_submit(ack, body, view, client, conn)
 
     return app
 
