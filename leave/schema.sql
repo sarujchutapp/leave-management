@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS requests (
     reason            TEXT,
     decline_reason    TEXT,
     calendar_event_id TEXT,
+    ticket_channel    TEXT,
+    ticket_ts         TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
-)
+);
+
+-- Migrate already-existing tables to add the ticket-message columns.
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS ticket_channel TEXT;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS ticket_ts TEXT

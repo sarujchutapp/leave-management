@@ -67,12 +67,16 @@ def test_submit_valid_persists_pending_and_dms_manager(conn):
     )
 
     assert ack.called and ack.response is None
-    row = conn.execute("SELECT status, reason FROM requests WHERE employee_id='U_ALICE'").fetchone()
+    row = conn.execute(
+        "SELECT status, reason, ticket_ts FROM requests WHERE employee_id='U_ALICE'"
+    ).fetchone()
     assert row["status"] == "pending"
     assert row["reason"] == "trip"
     # ticket DM'd to the manager
     assert len(client.chat_postMessage_calls) == 1
     assert client.chat_postMessage_calls[0]["channel"] == "U_BOSS"
+    # the ticket message reference is stored for later withdrawal
+    assert row["ticket_ts"] is not None
     # pending request -> no calendar event
     assert calendar.created == []
 

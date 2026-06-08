@@ -26,6 +26,7 @@ from leave.requests import (
     get_request,
     remaining_balance,
     set_calendar_event_id,
+    set_ticket_ref,
 )
 from leave.validation import validate_request
 
@@ -97,11 +98,13 @@ def submit_leave(ack, body, view, client, conn, calendar, today=None):
     blocks = build_ticket(
         request_id, employee["real_name"], leave_type, start, end, reason, remaining
     )
-    client.chat_postMessage(
+    resp = client.chat_postMessage(
         channel=employee["manager_id"],
         text=f"{employee['real_name']} requests {leave_type} leave",
         blocks=blocks,
     )
+    # Remember the ticket message so it can be withdrawn if the employee cancels.
+    set_ticket_ref(conn, request_id, resp["channel"], resp["ts"])
 
 
 def _notify(client, employee_id, text):
@@ -246,12 +249,30 @@ def submit_cancel(ack, body, view, client, conn, calendar, today=None):
         _notify(client, body["user"]["id"], CANNOT_CANCEL)
         return
 
-    was_approved = request["status"] == "approved"
+    status_before = request["status"]
     cancel_request(conn, request_id)
+    employee = get_employee(conn, request["employee_id"])
 
-    if was_approved and request["calendar_event_id"]:
+    if status_before == "pending" and request["ticket_ts"]:
+        # Withdraw the manager's still-open ticket so its buttons disappear.
+        client.chat_update(
+            channel=request["ticket_channel"],
+            ts=request["ticket_ts"],
+            text="Request withdrawn",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"{employee['real_name']} withdrew this {request['leave_type']} "
+                        "request before a decision.",
+                    },
+                }
+            ],
+        )
+
+    if status_before == "approved" and request["calendar_event_id"]:
         calendar.delete_event(request["calendar_event_id"])
-        employee = get_employee(conn, request["employee_id"])
         if employee["manager_id"]:
             _notify(
                 client,
