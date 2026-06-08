@@ -9,7 +9,7 @@ from datetime import date
 
 from leave.blocks import (
     LEAVE_TYPES,
-    build_cancel_modal,
+    build_cancel_list,
     build_decision_notice,
     build_decline_modal,
     build_leave_modal,
@@ -223,7 +223,7 @@ def handle_decline_submit(ack, body, view, client, conn):
     _notify(client, employee["slack_user_id"], text)
 
 
-def open_cancel_modal(ack, body, client, conn, today=None):
+def open_cancel_list(ack, body, conn, today=None):
     today = today or date.today()
     employee = get_employee(conn, body["user_id"])
     if employee is None:
@@ -233,20 +233,20 @@ def open_cancel_modal(ack, body, client, conn, today=None):
     if not rows:
         ack(NOTHING_TO_CANCEL)
         return
-    ack()
-    client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows))
+    # Ephemeral list; each row has its own Cancel button (one click to cancel).
+    ack(blocks=build_cancel_list(rows))
 
 
-def submit_cancel(ack, body, view, client, conn, calendar, today=None):
+def handle_cancel(ack, body, client, conn, calendar, respond, today=None):
     ack()
     today = today or date.today()
-    request_id = int(view["state"]["values"]["request"]["value"]["selected_option"]["value"])
+    request_id = int(body["actions"][0]["value"])
     request = get_request(conn, request_id)
 
     if body["user"]["id"] != request["employee_id"]:
         return
     if not can_cancel(request, today):
-        _notify(client, body["user"]["id"], CANNOT_CANCEL)
+        respond(text=CANNOT_CANCEL, replace_original=True)
         return
 
     status_before = request["status"]
@@ -281,4 +281,9 @@ def submit_cancel(ack, body, view, client, conn, calendar, today=None):
                 f"leave {request['start_date']} → {request['end_date']}.",
             )
 
-    _notify(client, body["user"]["id"], "Cancelled successfully.")
+    # Replace the ephemeral list in place so the buttons don't linger.
+    respond(
+        text=f"✅ Cancelled your {request['leave_type']} leave "
+        f"{request['start_date']} → {request['end_date']}.",
+        replace_original=True,
+    )
