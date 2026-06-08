@@ -7,6 +7,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from leave import db
+from leave.calendar_client import CalendarClient
 from leave.blocks import (
     APPROVE_ACTION,
     DECLINE_ACTION,
@@ -26,6 +27,7 @@ load_dotenv()
 
 def build_app():
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
+    calendar = CalendarClient.from_env()
 
     @app.command("/leave")
     def _open(ack, body, client):
@@ -35,12 +37,12 @@ def build_app():
     @app.view(LEAVE_CALLBACK_ID)
     def _submit(ack, body, view, client):
         with db.connect() as conn:
-            submit_leave(ack, body, view, client, conn)
+            submit_leave(ack, body, view, client, conn, calendar)
 
     @app.action(APPROVE_ACTION)
     def _approve(ack, body, client):
         with db.connect() as conn:
-            handle_approve(ack, body, client, conn)
+            handle_approve(ack, body, client, conn, calendar)
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):

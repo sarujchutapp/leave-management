@@ -1,6 +1,20 @@
 """Test doubles for Slack client and ack, recording calls for assertions."""
 
 
+class FakeCalendar:
+    def __init__(self):
+        self.created = []
+        self.deleted = []
+
+    def create_event(self, summary, start, end):
+        event_id = f"evt{len(self.created) + 1}"
+        self.created.append({"summary": summary, "start": start, "end": end, "id": event_id})
+        return event_id
+
+    def delete_event(self, event_id):
+        self.deleted.append(event_id)
+
+
 def make_action_body(value, user_id, channel="C1", ts="111.1", trigger_id="T"):
     """A block_actions payload (Approve/Decline button click)."""
     return {

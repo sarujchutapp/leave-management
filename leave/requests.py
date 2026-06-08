@@ -66,3 +66,9 @@ def decline_request(conn, request_id, reason):
         "UPDATE requests SET status='declined', decline_reason=%s, updated_at=now() WHERE id=%s",
         (reason, request_id),
     )
+
+
+def set_calendar_event_id(conn, request_id, event_id):
+    conn.execute(
+        "UPDATE requests SET calendar_event_id=%s WHERE id=%s", (event_id, request_id)
+    )
