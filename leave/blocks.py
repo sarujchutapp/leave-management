@@ -3,6 +3,9 @@
 LEAVE_TYPES = ["sick", "vacation", "personal"]
 
 LEAVE_CALLBACK_ID = "leave_submit"
+APPROVE_ACTION = "approve_request"
+DECLINE_ACTION = "decline_request"
+DECLINE_CALLBACK_ID = "decline_submit"
 
 
 def build_leave_modal(balances=None):
@@ -68,3 +71,69 @@ def build_leave_modal(balances=None):
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
     }
+
+
+def build_ticket(request_id, employee_name, leave_type, start, end, reason, remaining):
+    """Manager's approval ticket: details + Approve/Decline buttons."""
+    detail = f"*{employee_name}* requests *{leave_type}* leave\n{start} → {end}"
+    context = f"Balance left for {leave_type}: {remaining}"
+    if reason:
+        context += f"\nReason: {reason}"
+    rid = str(request_id)
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": detail}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": context}},
+        {
+            "type": "actions",
+            "block_id": "ticket_actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": APPROVE_ACTION,
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": "Approve"},
+                    "value": rid,
+                },
+                {
+                    "type": "button",
+                    "action_id": DECLINE_ACTION,
+                    "style": "danger",
+                    "text": {"type": "plain_text", "text": "Decline"},
+                    "value": rid,
+                },
+            ],
+        },
+    ]
+
+
+def build_decline_modal(private_metadata):
+    """Modal asking the manager for an optional decline reason."""
+    return {
+        "type": "modal",
+        "callback_id": DECLINE_CALLBACK_ID,
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "Decline Leave"},
+        "submit": {"type": "plain_text", "text": "Decline"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "decline_reason",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Reason (optional)"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "value",
+                    "multiline": True,
+                },
+            }
+        ],
+    }
+
+
+def build_decision_notice(employee_name, leave_type, start, end, decision, reason=None):
+    """Replaces the ticket's buttons once a decision is made."""
+    text = f"{decision}: *{employee_name}* — {leave_type} {start} → {end}"
+    if reason:
+        text += f"\nReason: {reason}"
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]

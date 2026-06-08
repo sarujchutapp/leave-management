@@ -49,3 +49,20 @@ def create_request(conn, employee_id, leave_type, start, end, reason):
             (employee_id, leave_type, start, end, reason),
         )
         return cur.fetchone()["id"]
+
+
+def get_request(conn, request_id):
+    return conn.execute("SELECT * FROM requests WHERE id = %s", (request_id,)).fetchone()
+
+
+def approve_request(conn, request_id):
+    conn.execute(
+        "UPDATE requests SET status='approved', updated_at=now() WHERE id=%s", (request_id,)
+    )
+
+
+def decline_request(conn, request_id, reason):
+    conn.execute(
+        "UPDATE requests SET status='declined', decline_reason=%s, updated_at=now() WHERE id=%s",
+        (reason, request_id),
+    )
