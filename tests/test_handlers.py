@@ -12,8 +12,8 @@ def _block_by_id(view, block_id):
     return next(b for b in view["blocks"] if b.get("block_id") == block_id)
 
 
-def test_registered_user_opens_modal_with_balances(conn):
-    upsert_employee(conn, "U_ALICE", "Alice", None)
+def test_registered_user_opens_modal_with_balances(db):
+    upsert_employee(db, "U_ALICE", "Alice", None)
     client = FakeSlackClient()
     ack = FakeAck()
 
@@ -21,7 +21,7 @@ def test_registered_user_opens_modal_with_balances(conn):
         ack=ack,
         body={"user_id": "U_ALICE", "trigger_id": "T123"},
         client=client,
-        conn=conn,
+        db=db,
         today=TODAY,
     )
 
@@ -36,21 +36,21 @@ def test_registered_user_opens_modal_with_balances(conn):
     assert any(b["type"] == "context" for b in view["blocks"])
 
 
-def test_unregistered_user_gets_contact_admin(conn):
+def test_unregistered_user_gets_contact_admin(db):
     client = FakeSlackClient()
     ack = FakeAck()
 
     open_leave_modal(
-        ack=ack, body={"user_id": "U_NOPE", "trigger_id": "T"}, client=client, conn=conn, today=TODAY
+        ack=ack, body={"user_id": "U_NOPE", "trigger_id": "T"}, client=client, db=db, today=TODAY
     )
 
     assert ack.response == CONTACT_ADMIN
     assert client.views_open_calls == []
 
 
-def test_submit_valid_persists_pending_and_dms_manager(conn):
-    upsert_employee(conn, "U_BOSS", "Boss", None)
-    upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
+def test_submit_valid_persists_pending_and_dms_manager(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")
     ack = FakeAck()
     client = FakeSlackClient()
     calendar = FakeCalendar()
@@ -61,13 +61,13 @@ def test_submit_valid_persists_pending_and_dms_manager(conn):
         body={"user": {"id": "U_ALICE"}},
         view=view,
         client=client,
-        conn=conn,
+        db=db,
         calendar=calendar,
         today=TODAY,
     )
 
     assert ack.called and ack.response is None
-    row = conn.execute(
+    row = db.execute(
         "SELECT status, reason, ticket_ts FROM requests WHERE employee_id='U_ALICE'"
     ).fetchone()
     assert row["status"] == "pending"
@@ -81,8 +81,8 @@ def test_submit_valid_persists_pending_and_dms_manager(conn):
     assert calendar.created == []
 
 
-def test_submit_auto_approves_when_no_manager(conn):
-    upsert_employee(conn, "U_SOLO", "Solo", None)  # no manager
+def test_submit_auto_approves_when_no_manager(db):
+    upsert_employee(db, "U_SOLO", "Solo", None)  # no manager
     ack = FakeAck()
     client = FakeSlackClient()
     calendar = FakeCalendar()
@@ -93,12 +93,12 @@ def test_submit_auto_approves_when_no_manager(conn):
         body={"user": {"id": "U_SOLO"}},
         view=view,
         client=client,
-        conn=conn,
+        db=db,
         calendar=calendar,
         today=TODAY,
     )
 
-    row = conn.execute(
+    row = db.execute(
         "SELECT status, calendar_event_id FROM requests WHERE employee_id='U_SOLO'"
     ).fetchone()
     assert row["status"] == "approved"
@@ -111,9 +111,9 @@ def test_submit_auto_approves_when_no_manager(conn):
     assert row["calendar_event_id"] == calendar.created[0]["id"]
 
 
-def test_submit_converts_buddhist_era_dates(conn):
+def test_submit_converts_buddhist_era_dates(db):
     # Thai-locale Slack date pickers send Buddhist-era years (CE + 543).
-    upsert_employee(conn, "U_SOLO", "Solo", None)
+    upsert_employee(db, "U_SOLO", "Solo", None)
     calendar = FakeCalendar()
     view = make_leave_view("vacation", "2569-06-10", "2569-06-11")  # = 2026-06-10/11
 
@@ -122,12 +122,12 @@ def test_submit_converts_buddhist_era_dates(conn):
         body={"user": {"id": "U_SOLO"}},
         view=view,
         client=FakeSlackClient(),
-        conn=conn,
+        db=db,
         calendar=calendar,
         today=TODAY,
     )
 
-    row = conn.execute(
+    row = db.execute(
         "SELECT start_date, end_date FROM requests WHERE employee_id='U_SOLO'"
     ).fetchone()
     assert row["start_date"] == date(2026, 6, 10)
@@ -136,9 +136,9 @@ def test_submit_converts_buddhist_era_dates(conn):
     assert calendar.created[0]["start"] == date(2026, 6, 10)
 
 
-def test_submit_invalid_acks_errors_and_persists_nothing(conn):
-    upsert_employee(conn, "U_BOSS", "Boss", None)
-    upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
+def test_submit_invalid_acks_errors_and_persists_nothing(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")
     ack = FakeAck()
     client = FakeSlackClient()
     calendar = FakeCalendar()
@@ -149,14 +149,14 @@ def test_submit_invalid_acks_errors_and_persists_nothing(conn):
         body={"user": {"id": "U_ALICE"}},
         view=view,
         client=client,
-        conn=conn,
+        db=db,
         calendar=calendar,
         today=TODAY,
     )
 
     assert ack.response["response_action"] == "errors"
     assert "end_date" in ack.response["errors"]
-    count = conn.execute("SELECT count(*) AS n FROM requests").fetchone()["n"]
+    count = db.execute("SELECT count(*) AS n FROM requests").fetchone()["n"]
     assert count == 0
     assert client.chat_postMessage_calls == []
     assert calendar.created == []

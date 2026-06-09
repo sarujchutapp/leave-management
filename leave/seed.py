@@ -1,38 +1,68 @@
-"""Schema application and proxy-data seeding.
+"""Table provisioning and proxy-data seeding.
 
-Run `python -m leave.seed` to (re)create the schema and load proxy employees.
-Replace the proxy Slack IDs with real ones (Slack profile -> Copy member ID)
-to exercise the bot live.
+Run `python -m leave.seed` to provision the DynamoDB tables (on-demand) and load
+proxy employees. Replace the proxy Slack IDs with real ones (Slack profile ->
+Copy member ID) to exercise the bot live.
 """
 
-from pathlib import Path
+import os
 
-from psycopg.types.json import Jsonb
+import boto3
 
 from leave import db
 
 DEFAULT_ALLOWANCES = {"sick": 30, "vacation": 10, "personal": 5}
 
-_SCHEMA = Path(__file__).with_name("schema.sql").read_text()
+
+def create_tables():
+    """Provision both tables in on-demand (PAY_PER_REQUEST) mode: `employees`
+    (PK slack_user_id) and `requests` (PK request_id) with the `by_employee`
+    GSI (partition employee_id, sort start_date, projection ALL). Idempotent."""
+    dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION"))
+    existing = dynamodb.meta.client.list_tables()["TableNames"]
+
+    if db.EMPLOYEES_TABLE not in existing:
+        dynamodb.create_table(
+            TableName=db.EMPLOYEES_TABLE,
+            KeySchema=[{"AttributeName": "slack_user_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "slack_user_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+    if db.REQUESTS_TABLE not in existing:
+        dynamodb.create_table(
+            TableName=db.REQUESTS_TABLE,
+            KeySchema=[{"AttributeName": "request_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "request_id", "AttributeType": "S"},
+                {"AttributeName": "employee_id", "AttributeType": "S"},
+                {"AttributeName": "start_date", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": db.BY_EMPLOYEE_INDEX,
+                    "KeySchema": [
+                        {"AttributeName": "employee_id", "KeyType": "HASH"},
+                        {"AttributeName": "start_date", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+        )
+
+    waiter = dynamodb.meta.client.get_waiter("table_exists")
+    waiter.wait(TableName=db.EMPLOYEES_TABLE)
+    waiter.wait(TableName=db.REQUESTS_TABLE)
 
 
-def apply_schema(conn):
-    # psycopg's execute() runs one statement at a time, so split the file.
-    for statement in filter(str.strip, _SCHEMA.split(";")):
-        conn.execute(statement)
-
-
-def upsert_employee(conn, slack_user_id, real_name, manager_id=None, allowances=None):
-    conn.execute(
-        """
-        INSERT INTO employees (slack_user_id, real_name, manager_id, allowances)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (slack_user_id) DO UPDATE
-        SET real_name = EXCLUDED.real_name,
-            manager_id = EXCLUDED.manager_id,
-            allowances = EXCLUDED.allowances
-        """,
-        (slack_user_id, real_name, manager_id, Jsonb(allowances or DEFAULT_ALLOWANCES)),
+def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=None):
+    db.employees.put_item(
+        Item={
+            "slack_user_id": slack_user_id,
+            "real_name": real_name,
+            "manager_id": manager_id,
+            "allowances": allowances or DEFAULT_ALLOWANCES,
+        }
     )
 
 
@@ -47,12 +77,11 @@ def main():
     from dotenv import load_dotenv
 
     load_dotenv()
-    with db.connect() as conn:
-        apply_schema(conn)
-        for slack_user_id, real_name, manager_id in PROXY_EMPLOYEES:
-            upsert_employee(conn, slack_user_id, real_name, manager_id)
-        conn.commit()
-        print(f"Seeded {len(PROXY_EMPLOYEES)} employees.")
+    create_tables()
+    handle = db.connect()
+    for slack_user_id, real_name, manager_id in PROXY_EMPLOYEES:
+        upsert_employee(handle, slack_user_id, real_name, manager_id)
+    print(f"Seeded {len(PROXY_EMPLOYEES)} employees.")
 
 
 if __name__ == "__main__":

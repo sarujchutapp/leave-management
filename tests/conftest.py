@@ -1,29 +1,22 @@
-"""Test fixtures. Each test gets an isolated `leave_test` schema on the real
-Postgres so it never touches the live `public` data the bot uses.
+"""Test fixtures. Each test gets a fully offline DynamoDB via moto (`mock_aws`):
+both tables + the `by_employee` GSI are provisioned per test, so nothing touches
+a real AWS account and no credentials or `DATABASE_URL` are needed.
 """
 
-import os
-
-import psycopg
 import pytest
-from dotenv import load_dotenv
-from psycopg.rows import dict_row
+from moto import mock_aws
 
-from leave.seed import apply_schema
-
-TEST_SCHEMA = "leave_test"
+from leave.db import connect
+from leave.seed import create_tables
 
 
 @pytest.fixture
-def conn():
-    load_dotenv()
-    c = psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row, autocommit=True)
-    c.execute(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE")
-    c.execute(f"CREATE SCHEMA {TEST_SCHEMA}")
-    c.execute(f"SET search_path TO {TEST_SCHEMA}")
-    apply_schema(c)
-    try:
-        yield c
-    finally:
-        c.execute(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE")
-        c.close()
+def db(monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    with mock_aws():
+        create_tables()
+        yield connect()

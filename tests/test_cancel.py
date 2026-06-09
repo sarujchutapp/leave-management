@@ -16,31 +16,31 @@ FUTURE_START = date(2026, 6, 10)
 FUTURE_END = date(2026, 6, 11)
 
 
-def _people(conn):
-    upsert_employee(conn, "U_BOSS", "Boss", None)
-    upsert_employee(conn, "U_ALICE", "Alice", "U_BOSS")
-    upsert_employee(conn, "U_BOB", "Bob", "U_BOSS")
+def _people(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")
+    upsert_employee(db, "U_BOB", "Bob", "U_BOSS")
 
 
-def _approved_future(conn):
-    rid = create_request(conn, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
-    conn.execute(
+def _approved_future(db):
+    rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+    db.execute(
         "UPDATE requests SET status='approved', calendar_event_id='evtX' WHERE id=%s", (rid,)
     )
     return rid
 
 
-def _status(conn, rid):
-    return conn.execute("SELECT status FROM requests WHERE id=%s", (rid,)).fetchone()["status"]
+def _status(db, rid):
+    return db.execute("SELECT status FROM requests WHERE id=%s", (rid,)).fetchone()["status"]
 
 
-def _cancel(conn, rid, user, calendar=None, client=None, today=TODAY):
+def _cancel(db, rid, user, calendar=None, client=None, today=TODAY):
     submit_cancel(
         ack=FakeAck(),
         body={"user": {"id": user}},
         view=make_cancel_view(rid),
         client=client or FakeSlackClient(),
-        conn=conn,
+        db=db,
         calendar=calendar or FakeCalendar(),
         today=today,
     )
@@ -57,88 +57,88 @@ def test_can_cancel_rules():
 
 # --- submit_cancel ---------------------------------------------------------
 
-def test_cancel_pending(conn):
-    _people(conn)
-    rid = create_request(conn, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+def test_cancel_pending(db):
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
     calendar = FakeCalendar()
 
-    _cancel(conn, rid, "U_ALICE", calendar=calendar)
+    _cancel(db, rid, "U_ALICE", calendar=calendar)
 
-    assert _status(conn, rid) == "cancelled"
+    assert _status(db, rid) == "cancelled"
     assert calendar.deleted == []  # nothing on the calendar for a pending request
 
 
-def test_cancel_pending_withdraws_manager_ticket(conn):
-    _people(conn)
-    rid = create_request(conn, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
-    conn.execute("UPDATE requests SET ticket_channel='D1', ticket_ts='9.9' WHERE id=%s", (rid,))
+def test_cancel_pending_withdraws_manager_ticket(db):
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+    db.execute("UPDATE requests SET ticket_channel='D1', ticket_ts='9.9' WHERE id=%s", (rid,))
     client = FakeSlackClient()
 
-    _cancel(conn, rid, "U_ALICE", client=client)
+    _cancel(db, rid, "U_ALICE", client=client)
 
-    assert _status(conn, rid) == "cancelled"
+    assert _status(db, rid) == "cancelled"
     assert len(client.chat_update_calls) == 1
     assert client.chat_update_calls[0]["channel"] == "D1"
     assert client.chat_update_calls[0]["ts"] == "9.9"
 
 
-def test_cancel_approved_before_start_deletes_event_and_notifies_manager(conn):
-    _people(conn)
-    rid = _approved_future(conn)
+def test_cancel_approved_before_start_deletes_event_and_notifies_manager(db):
+    _people(db)
+    rid = _approved_future(db)
     client, calendar = FakeSlackClient(), FakeCalendar()
 
-    _cancel(conn, rid, "U_ALICE", calendar=calendar, client=client)
+    _cancel(db, rid, "U_ALICE", calendar=calendar, client=client)
 
-    assert _status(conn, rid) == "cancelled"
+    assert _status(db, rid) == "cancelled"
     assert calendar.deleted == ["evtX"]
     assert "U_BOSS" in [c["channel"] for c in client.chat_postMessage_calls]  # manager FYI
 
 
-def test_cancel_refunds_balance(conn):
-    _people(conn)
-    rid = _approved_future(conn)
-    alice = get_employee(conn, "U_ALICE")
-    assert remaining_balance(conn, alice, "vacation", TODAY) == 8  # Wed-Thu used
+def test_cancel_refunds_balance(db):
+    _people(db)
+    rid = _approved_future(db)
+    alice = get_employee(db, "U_ALICE")
+    assert remaining_balance(db, alice, "vacation", TODAY) == 8  # Wed-Thu used
 
-    _cancel(conn, rid, "U_ALICE")
-    assert remaining_balance(conn, alice, "vacation", TODAY) == 10
+    _cancel(db, rid, "U_ALICE")
+    assert remaining_balance(db, alice, "vacation", TODAY) == 10
 
 
-def test_cannot_cancel_approved_after_start(conn):
-    _people(conn)
-    rid = create_request(conn, "U_ALICE", "vacation", date(2026, 6, 1), date(2026, 6, 2), None)
-    conn.execute("UPDATE requests SET status='approved' WHERE id=%s", (rid,))
+def test_cannot_cancel_approved_after_start(db):
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", date(2026, 6, 1), date(2026, 6, 2), None)
+    db.execute("UPDATE requests SET status='approved' WHERE id=%s", (rid,))
     client = FakeSlackClient()
 
-    _cancel(conn, rid, "U_ALICE", client=client)
+    _cancel(db, rid, "U_ALICE", client=client)
 
-    assert _status(conn, rid) == "approved"
+    assert _status(db, rid) == "approved"
     assert client.chat_postMessage_calls[0]["text"] == CANNOT_CANCEL
 
 
-def test_other_user_cannot_cancel(conn):
-    _people(conn)
-    rid = create_request(conn, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+def test_other_user_cannot_cancel(db):
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
 
-    _cancel(conn, rid, "U_BOB")
+    _cancel(db, rid, "U_BOB")
 
-    assert _status(conn, rid) == "pending"
+    assert _status(db, rid) == "pending"
 
 
 # --- open_cancel_modal -----------------------------------------------------
 
-def test_cancel_modal_lists_pending_and_future_approved_only(conn):
-    _people(conn)
-    pending = create_request(conn, "U_ALICE", "sick", FUTURE_START, FUTURE_END, None)
-    approved_future = _approved_future(conn)
-    past = create_request(conn, "U_ALICE", "vacation", date(2026, 6, 1), date(2026, 6, 2), None)
-    conn.execute("UPDATE requests SET status='approved' WHERE id=%s", (past,))
-    declined = create_request(conn, "U_ALICE", "personal", FUTURE_START, FUTURE_END, None)
-    conn.execute("UPDATE requests SET status='declined' WHERE id=%s", (declined,))
+def test_cancel_modal_lists_pending_and_future_approved_only(db):
+    _people(db)
+    pending = create_request(db, "U_ALICE", "sick", FUTURE_START, FUTURE_END, None)
+    approved_future = _approved_future(db)
+    past = create_request(db, "U_ALICE", "vacation", date(2026, 6, 1), date(2026, 6, 2), None)
+    db.execute("UPDATE requests SET status='approved' WHERE id=%s", (past,))
+    declined = create_request(db, "U_ALICE", "personal", FUTURE_START, FUTURE_END, None)
+    db.execute("UPDATE requests SET status='declined' WHERE id=%s", (declined,))
 
     client, ack = FakeSlackClient(), FakeAck()
     open_cancel_modal(
-        ack=ack, body={"user_id": "U_ALICE", "trigger_id": "T"}, client=client, conn=conn, today=TODAY
+        ack=ack, body={"user_id": "U_ALICE", "trigger_id": "T"}, client=client, db=db, today=TODAY
     )
 
     assert ack.response is None
@@ -148,11 +148,11 @@ def test_cancel_modal_lists_pending_and_future_approved_only(conn):
     assert {o["value"] for o in options} == {str(pending), str(approved_future)}
 
 
-def test_cancel_modal_empty(conn):
-    _people(conn)
+def test_cancel_modal_empty(db):
+    _people(db)
     client, ack = FakeSlackClient(), FakeAck()
     open_cancel_modal(
-        ack=ack, body={"user_id": "U_ALICE", "trigger_id": "T"}, client=client, conn=conn, today=TODAY
+        ack=ack, body={"user_id": "U_ALICE", "trigger_id": "T"}, client=client, db=db, today=TODAY
     )
     assert ack.response == NOTHING_TO_CANCEL
     assert client.views_open_calls == []

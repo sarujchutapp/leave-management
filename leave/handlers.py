@@ -36,14 +36,14 @@ NOTHING_TO_CANCEL = "You have no requests to cancel."
 CANNOT_CANCEL = "That request can no longer be cancelled."
 
 
-def open_leave_modal(ack, body, client, conn, today=None):
+def open_leave_modal(ack, body, client, db, today=None):
     today = today or date.today()
-    employee = get_employee(conn, body["user_id"])
+    employee = get_employee(db, body["user_id"])
     if employee is None:
         ack(CONTACT_ADMIN)
         return
     ack()
-    balances = {t: remaining_balance(conn, employee, t, today) for t in LEAVE_TYPES}
+    balances = {t: remaining_balance(db, employee, t, today) for t in LEAVE_TYPES}
     client.views_open(trigger_id=body["trigger_id"], view=build_leave_modal(balances))
 
 
@@ -64,29 +64,29 @@ def _parse_submission(view):
     return leave_type, start, end, reason
 
 
-def _finalize_approval(conn, calendar, request_id, employee, leave_type, start, end):
+def _finalize_approval(db, calendar, request_id, employee, leave_type, start, end):
     """Mark approved and create the shared-calendar event, storing its id."""
-    approve_request(conn, request_id)
+    approve_request(db, request_id)
     event_id = calendar.create_event(f"{employee['real_name']} — {leave_type}", start, end)
-    set_calendar_event_id(conn, request_id, event_id)
+    set_calendar_event_id(db, request_id, event_id)
 
 
-def submit_leave(ack, body, view, client, conn, calendar, today=None):
+def submit_leave(ack, body, view, client, db, calendar, today=None):
     today = today or date.today()
-    employee = get_employee(conn, body["user"]["id"])
+    employee = get_employee(db, body["user"]["id"])
     leave_type, start, end, reason = _parse_submission(view)
 
-    errors = validate_request(conn, employee, leave_type, start, end, today)
+    errors = validate_request(db, employee, leave_type, start, end, today)
     if errors:
         ack(response_action="errors", errors=errors)
         return
 
-    request_id = create_request(conn, employee["slack_user_id"], leave_type, start, end, reason)
+    request_id = create_request(db, employee["slack_user_id"], leave_type, start, end, reason)
     ack()
 
     # Top of chain: no manager to approve, so auto-approve.
     if employee["manager_id"] is None:
-        _finalize_approval(conn, calendar, request_id, employee, leave_type, start, end)
+        _finalize_approval(db, calendar, request_id, employee, leave_type, start, end)
         _notify(
             client,
             employee["slack_user_id"],
@@ -94,7 +94,7 @@ def submit_leave(ack, body, view, client, conn, calendar, today=None):
         )
         return
 
-    remaining = remaining_balance(conn, employee, leave_type, today)
+    remaining = remaining_balance(db, employee, leave_type, today)
     blocks = build_ticket(
         request_id, employee["real_name"], leave_type, start, end, reason, remaining
     )
@@ -104,7 +104,7 @@ def submit_leave(ack, body, view, client, conn, calendar, today=None):
         blocks=blocks,
     )
     # Remember the ticket message so it can be withdrawn if the employee cancels.
-    set_ticket_ref(conn, request_id, resp["channel"], resp["ts"])
+    set_ticket_ref(db, request_id, resp["channel"], resp["ts"])
 
 
 def _notify(client, employee_id, text):
@@ -131,11 +131,11 @@ def _close_stale_ticket(client, channel, ts, request):
     )
 
 
-def handle_approve(ack, body, client, conn, calendar):
+def handle_approve(ack, body, client, db, calendar):
     ack()
     request_id = int(body["actions"][0]["value"])
-    request = get_request(conn, request_id)
-    employee = get_employee(conn, request["employee_id"])
+    request = get_request(db, request_id)
+    employee = get_employee(db, request["employee_id"])
 
     if body["user"]["id"] != employee["manager_id"]:
         _notify(client, body["user"]["id"], NOT_APPROVER)
@@ -145,7 +145,7 @@ def handle_approve(ack, body, client, conn, calendar):
         return
 
     _finalize_approval(
-        conn,
+        db,
         calendar,
         request_id,
         employee,
@@ -172,10 +172,10 @@ def handle_approve(ack, body, client, conn, calendar):
     )
 
 
-def handle_decline_click(ack, body, client, conn):
+def handle_decline_click(ack, body, client, db):
     ack()
     request_id = int(body["actions"][0]["value"])
-    request = get_request(conn, request_id)
+    request = get_request(db, request_id)
     if request["status"] != "pending":
         _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
         return
@@ -189,21 +189,21 @@ def handle_decline_click(ack, body, client, conn):
     client.views_open(trigger_id=body["trigger_id"], view=build_decline_modal(meta))
 
 
-def handle_decline_submit(ack, body, view, client, conn):
+def handle_decline_submit(ack, body, view, client, db):
     ack()
     meta = json.loads(view["private_metadata"])
     request_id = int(meta["request_id"])
     reason = view["state"]["values"]["decline_reason"]["value"].get("value")
 
-    request = get_request(conn, request_id)
-    employee = get_employee(conn, request["employee_id"])
+    request = get_request(db, request_id)
+    employee = get_employee(db, request["employee_id"])
     if body["user"]["id"] != employee["manager_id"]:
         return
     if request["status"] != "pending":
         _close_stale_ticket(client, meta["channel"], meta["ts"], request)
         return
 
-    decline_request(conn, request_id, reason)
+    decline_request(db, request_id, reason)
     client.chat_update(
         channel=meta["channel"],
         ts=meta["ts"],
@@ -223,13 +223,13 @@ def handle_decline_submit(ack, body, view, client, conn):
     _notify(client, employee["slack_user_id"], text)
 
 
-def open_cancel_modal(ack, body, client, conn, today=None):
+def open_cancel_modal(ack, body, client, db, today=None):
     today = today or date.today()
-    employee = get_employee(conn, body["user_id"])
+    employee = get_employee(db, body["user_id"])
     if employee is None:
         ack(CONTACT_ADMIN)
         return
-    rows = cancellable_requests(conn, employee["slack_user_id"], today)
+    rows = cancellable_requests(db, employee["slack_user_id"], today)
     if not rows:
         ack(NOTHING_TO_CANCEL)
         return
@@ -237,11 +237,11 @@ def open_cancel_modal(ack, body, client, conn, today=None):
     client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows))
 
 
-def submit_cancel(ack, body, view, client, conn, calendar, today=None):
+def submit_cancel(ack, body, view, client, db, calendar, today=None):
     ack()
     today = today or date.today()
     request_id = int(view["state"]["values"]["request"]["value"]["selected_option"]["value"])
-    request = get_request(conn, request_id)
+    request = get_request(db, request_id)
 
     if body["user"]["id"] != request["employee_id"]:
         return
@@ -250,8 +250,8 @@ def submit_cancel(ack, body, view, client, conn, calendar, today=None):
         return
 
     status_before = request["status"]
-    cancel_request(conn, request_id)
-    employee = get_employee(conn, request["employee_id"])
+    cancel_request(db, request_id)
+    employee = get_employee(db, request["employee_id"])
 
     if status_before == "pending" and request["ticket_ts"]:
         # Withdraw the manager's still-open ticket so its buttons disappear.
@@ -284,6 +284,6 @@ def submit_cancel(ack, body, view, client, conn, calendar, today=None):
     _notify(
         client,
         body["user"]["id"],
-        f"✅ Cancelled your {request['leave_type']} leave "
+        f"Cancelled your {request['leave_type']} leave "
         f"{request['start_date']} → {request['end_date']}.",
     )
