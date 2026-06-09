@@ -27,17 +27,17 @@ Decisions converged during grilling session, 2026-06-05.
    - past leave immutable
 6. No reminders or auto-expiry in v1; a pending request whose dates pass becomes inert.
 
-## Data (PostgreSQL — Supabase/Neon free tier)
+## Data (DynamoDB — on-demand / pay-per-usage; see ADR-0001)
 
-- `employees`: slack_user_id (PK — Slack user ID, not username), real_name, manager_id (nullable), per-type annual allowances.
+- `employees` table: PK `slack_user_id` (Slack user ID, not username), `real_name`, `manager_id` (nullable), per-type annual `allowances` (Map).
   - **Pre-seeded; registration out of scope.**
-  - `manager_id = NULL` → requests **auto-approve** (top of chain).
+  - `manager_id = None` → requests **auto-approve** (top of chain).
   - Unregistered users get a "contact admin" error.
-- `requests`: employee, type, start, end, status (`pending/approved/declined/cancelled`), reason, decline_reason, calendar_event_id, timestamps. Full history kept.
-- **No stored balance counters** — `remaining = allowance − SUM(weekdays of approved requests this calendar year)`. Resets automatically at calendar-year boundary.
+- `requests` table: PK `request_id` (`uuid4`); employee, type, start, end, status (`pending/approved/declined/cancelled`), reason, decline_reason, calendar_event_id, ticket refs, timestamps. Full history kept. GSI `by_employee` (partition `employee_id`, sort `start_date`) serves the by-employee queries.
+- **No stored balance counters** — `remaining = allowance − SUM(weekdays of approved requests this calendar year)`, computed in app code over fetched rows. Resets automatically at calendar-year boundary.
 - Leave types: small fixed set (`sick`, `vacation`, `personal`).
 - Day counting: **weekdays only** (Mon–Fri). Thai public holidays punted to v2 (documented workaround: split the request around the holiday).
-- NoSQL considered and rejected: data is relational (foreign keys, SUM aggregations); document DB would force denormalized counters and consistency bugs.
+- Dates stored as ISO `YYYY-MM-DD` strings; non-key predicates (status, overlap, leave_type) filtered in app code. See ADR-0001 for why DynamoDB suits this data despite the relational-looking schema.
 
 ## Public calendar
 
@@ -47,7 +47,7 @@ Decisions converged during grilling session, 2026-06-05.
 
 ## Stack
 
-- Python: `slack-bolt` (**Socket Mode** — no public URL, runs locally during test phase), `google-api-python-client`, Postgres driver.
+- Python: `slack-bolt` (**Socket Mode** — no public URL, runs locally during test phase), `google-api-python-client`, `boto3` (DynamoDB).
 - Deploy to a free host (Render/Railway/Fly) later without code changes.
 
 ## Explicitly out of scope (v1)
