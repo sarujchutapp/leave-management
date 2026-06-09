@@ -40,14 +40,14 @@ def check_slack():
     return f"bot @{auth['user']} in workspace '{auth['team']}', Socket Mode connected"
 
 
-def check_postgres():
-    import psycopg
+def check_dynamodb():
+    from leave import db
 
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            cur.fetchone()
-    return "connected, SELECT 1 ok"
+    handle = db.connect()
+    client = handle.employees.meta.client
+    emp = client.describe_table(TableName=db.EMPLOYEES_TABLE)["Table"]["TableStatus"]
+    req = client.describe_table(TableName=db.REQUESTS_TABLE)["Table"]["TableStatus"]
+    return f"connected; {db.EMPLOYEES_TABLE}={emp}, {db.REQUESTS_TABLE}={req}"
 
 
 def check_calendar():
@@ -75,7 +75,7 @@ def check_calendar():
 
 
 record("Slack", check_slack)
-record("Postgres", check_postgres)
+record("DynamoDB", check_dynamodb)
 record("Google Calendar", check_calendar)
 
 print()

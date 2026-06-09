@@ -13,10 +13,13 @@ One-time provisioning of the three external resources, then a smoke check. All s
 5. **OAuth & Permissions** → Bot Token Scopes → add `chat:write` and `commands`. (Modals and DMs are covered by these.)
 6. **Install App** to the workspace → copy the **Bot User OAuth Token** (`xoxb-...`) into `SLACK_BOT_TOKEN`.
 
-## 2. Postgres
+## 2. AWS DynamoDB
 
-1. Create a free project on [Supabase](https://supabase.com) or [Neon](https://neon.tech).
-2. Copy the connection string into `DATABASE_URL`. (Supabase: Project Settings → Database → Connection string, URI form. Neon: dashboard connection string.)
+Persistence is DynamoDB in on-demand (pay-per-request) mode — see [ADR-0001](docs/adr/0001-dynamodb-for-persistence.md) for the rationale.
+
+1. Create an AWS account at https://aws.amazon.com (the free tier covers this usage).
+2. In the console → **IAM → Users → Create user**, then attach a DynamoDB-access policy (`AmazonDynamoDBFullAccess` is simplest for a personal setup; scope it down for a shared account).
+3. Open the user → **Security credentials → Create access key** ("Application running outside AWS"). Copy the key id/secret into `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, and set your region in `AWS_REGION` (e.g. `us-east-1`). The table names default to `leave_employees` / `leave_requests`; override `EMPLOYEES_TABLE` / `REQUESTS_TABLE` to use different ones.
 
 ## 3. Google Calendar + service account
 
@@ -30,4 +33,5 @@ One-time provisioning of the three external resources, then a smoke check. All s
 
 1. `cp .env.example .env` and fill in every value.
 2. `python -m venv .venv && .venv\Scripts\activate` (Windows PowerShell) then `pip install -r requirements.txt`.
-3. `python smoke_check.py` — expect `PASS` on all three. The calendar check creates and immediately deletes a throwaway event tomorrow.
+3. `python -m leave.seed` — provisions both DynamoDB tables + the `by_employee` GSI (on-demand) and seeds proxy employees.
+4. `python smoke_check.py` — expect `PASS` on all three. The calendar check creates and immediately deletes a throwaway event tomorrow.

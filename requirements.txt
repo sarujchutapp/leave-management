@@ -1,6 +1,5 @@
 slack-bolt
 slack-sdk
-psycopg[binary]
 boto3
 moto[dynamodb]
 google-api-python-client

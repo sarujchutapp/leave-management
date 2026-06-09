@@ -1,6 +1,6 @@
 """Test fixtures. Each test gets a fully offline DynamoDB via moto (`mock_aws`):
 both tables + the `by_employee` GSI are provisioned per test, so nothing touches
-a real AWS account and no credentials or `DATABASE_URL` are needed.
+a real AWS account and no real credentials are needed.
 """
 
 import pytest
