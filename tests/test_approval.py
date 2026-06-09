@@ -6,7 +6,7 @@ from leave.handlers import (
     handle_decline_click,
     handle_decline_submit,
 )
-from leave.requests import create_request
+from leave.requests import cancel_request, create_request, get_request
 from leave.seed import upsert_employee
 from tests.fakes import (
     FakeAck,
@@ -25,7 +25,7 @@ def _setup(db):
 
 
 def _status(db, rid):
-    return db.execute("SELECT status FROM requests WHERE id=%s", (rid,)).fetchone()["status"]
+    return get_request(db, rid)["status"]
 
 
 def test_manager_approves(db):
@@ -44,9 +44,7 @@ def test_manager_approves(db):
     assert len(client.chat_update_calls) == 1
     # calendar event created and stored
     assert len(calendar.created) == 1
-    stored = db.execute(
-        "SELECT calendar_event_id FROM requests WHERE id=%s", (rid,)
-    ).fetchone()["calendar_event_id"]
+    stored = get_request(db, rid)["calendar_event_id"]
     assert stored == calendar.created[0]["id"]
 
 
@@ -94,7 +92,7 @@ def test_decline_submit_sets_status_and_notifies_with_reason(db):
         ack=FakeAck(), body={"user": {"id": "U_BOSS"}}, view=view, client=client, db=db
     )
 
-    row = db.execute("SELECT status, decline_reason FROM requests WHERE id=%s", (rid,)).fetchone()
+    row = get_request(db, rid)
     assert row["status"] == "declined"
     assert row["decline_reason"] == "too busy"
     notice = client.chat_postMessage_calls[0]
@@ -104,7 +102,7 @@ def test_decline_submit_sets_status_and_notifies_with_reason(db):
 
 def test_cannot_approve_cancelled_request(db):
     rid = _setup(db)
-    db.execute("UPDATE requests SET status='cancelled' WHERE id=%s", (rid,))
+    cancel_request(db, rid)
     client, calendar = FakeSlackClient(), FakeCalendar()
 
     handle_approve(
@@ -131,7 +129,7 @@ def test_cannot_double_approve(db):
 
 def test_cannot_decline_cancelled_request(db):
     rid = _setup(db)
-    db.execute("UPDATE requests SET status='cancelled' WHERE id=%s", (rid,))
+    cancel_request(db, rid)
     client = FakeSlackClient()
     meta = json.dumps({"request_id": str(rid), "channel": "C9", "ts": "222.2"})
 

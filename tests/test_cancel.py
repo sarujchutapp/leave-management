@@ -7,7 +7,16 @@ from leave.handlers import (
     open_cancel_modal,
     submit_cancel,
 )
-from leave.requests import can_cancel, create_request, remaining_balance
+from leave.requests import (
+    approve_request,
+    can_cancel,
+    create_request,
+    decline_request,
+    get_request,
+    remaining_balance,
+    set_calendar_event_id,
+    set_ticket_ref,
+)
 from leave.seed import upsert_employee
 from tests.fakes import FakeAck, FakeCalendar, FakeSlackClient, make_cancel_view
 
@@ -24,14 +33,13 @@ def _people(db):
 
 def _approved_future(db):
     rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
-    db.execute(
-        "UPDATE requests SET status='approved', calendar_event_id='evtX' WHERE id=%s", (rid,)
-    )
+    approve_request(db, rid)
+    set_calendar_event_id(db, rid, "evtX")
     return rid
 
 
 def _status(db, rid):
-    return db.execute("SELECT status FROM requests WHERE id=%s", (rid,)).fetchone()["status"]
+    return get_request(db, rid)["status"]
 
 
 def _cancel(db, rid, user, calendar=None, client=None, today=TODAY):
@@ -71,7 +79,7 @@ def test_cancel_pending(db):
 def test_cancel_pending_withdraws_manager_ticket(db):
     _people(db)
     rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
-    db.execute("UPDATE requests SET ticket_channel='D1', ticket_ts='9.9' WHERE id=%s", (rid,))
+    set_ticket_ref(db, rid, "D1", "9.9")
     client = FakeSlackClient()
 
     _cancel(db, rid, "U_ALICE", client=client)
@@ -107,7 +115,7 @@ def test_cancel_refunds_balance(db):
 def test_cannot_cancel_approved_after_start(db):
     _people(db)
     rid = create_request(db, "U_ALICE", "vacation", date(2026, 6, 1), date(2026, 6, 2), None)
-    db.execute("UPDATE requests SET status='approved' WHERE id=%s", (rid,))
+    approve_request(db, rid)
     client = FakeSlackClient()
 
     _cancel(db, rid, "U_ALICE", client=client)
@@ -132,9 +140,9 @@ def test_cancel_modal_lists_pending_and_future_approved_only(db):
     pending = create_request(db, "U_ALICE", "sick", FUTURE_START, FUTURE_END, None)
     approved_future = _approved_future(db)
     past = create_request(db, "U_ALICE", "vacation", date(2026, 6, 1), date(2026, 6, 2), None)
-    db.execute("UPDATE requests SET status='approved' WHERE id=%s", (past,))
+    approve_request(db, past)
     declined = create_request(db, "U_ALICE", "personal", FUTURE_START, FUTURE_END, None)
-    db.execute("UPDATE requests SET status='declined' WHERE id=%s", (declined,))
+    decline_request(db, declined, None)
 
     client, ack = FakeSlackClient(), FakeAck()
     open_cancel_modal(

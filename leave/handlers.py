@@ -133,7 +133,7 @@ def _close_stale_ticket(client, channel, ts, request):
 
 def handle_approve(ack, body, client, db, calendar):
     ack()
-    request_id = int(body["actions"][0]["value"])
+    request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
     employee = get_employee(db, request["employee_id"])
 
@@ -174,7 +174,7 @@ def handle_approve(ack, body, client, db, calendar):
 
 def handle_decline_click(ack, body, client, db):
     ack()
-    request_id = int(body["actions"][0]["value"])
+    request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
     if request["status"] != "pending":
         _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
@@ -192,7 +192,7 @@ def handle_decline_click(ack, body, client, db):
 def handle_decline_submit(ack, body, view, client, db):
     ack()
     meta = json.loads(view["private_metadata"])
-    request_id = int(meta["request_id"])
+    request_id = meta["request_id"]
     reason = view["state"]["values"]["decline_reason"]["value"].get("value")
 
     request = get_request(db, request_id)
@@ -240,7 +240,7 @@ def open_cancel_modal(ack, body, client, db, today=None):
 def submit_cancel(ack, body, view, client, db, calendar, today=None):
     ack()
     today = today or date.today()
-    request_id = int(view["state"]["values"]["request"]["value"]["selected_option"]["value"])
+    request_id = view["state"]["values"]["request"]["value"]["selected_option"]["value"]
     request = get_request(db, request_id)
 
     if body["user"]["id"] != request["employee_id"]:

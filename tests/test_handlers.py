@@ -2,6 +2,7 @@ from datetime import date
 
 from leave.blocks import LEAVE_CALLBACK_ID, LEAVE_TYPES
 from leave.handlers import CONTACT_ADMIN, open_leave_modal, submit_leave
+from leave.requests import cancellable_requests
 from leave.seed import upsert_employee
 from tests.fakes import FakeAck, FakeCalendar, FakeSlackClient, make_leave_view
 
@@ -10,6 +11,14 @@ TODAY = date(2026, 6, 8)
 
 def _block_by_id(view, block_id):
     return next(b for b in view["blocks"] if b.get("block_id") == block_id)
+
+
+def _persisted(db, employee_id):
+    """The request submit_leave persisted, read via the by-employee seam. Every
+    request these tests create is future-dated, so it appears in the cancellable
+    list; returns None when nothing was persisted."""
+    rows = cancellable_requests(db, employee_id, TODAY)
+    return rows[0] if rows else None
 
 
 def test_registered_user_opens_modal_with_balances(db):
@@ -67,9 +76,7 @@ def test_submit_valid_persists_pending_and_dms_manager(db):
     )
 
     assert ack.called and ack.response is None
-    row = db.execute(
-        "SELECT status, reason, ticket_ts FROM requests WHERE employee_id='U_ALICE'"
-    ).fetchone()
+    row = _persisted(db, "U_ALICE")
     assert row["status"] == "pending"
     assert row["reason"] == "trip"
     # ticket DM'd to the manager
@@ -98,9 +105,7 @@ def test_submit_auto_approves_when_no_manager(db):
         today=TODAY,
     )
 
-    row = db.execute(
-        "SELECT status, calendar_event_id FROM requests WHERE employee_id='U_SOLO'"
-    ).fetchone()
+    row = _persisted(db, "U_SOLO")
     assert row["status"] == "approved"
     # notified themselves; no approval ticket routed to anyone else
     assert len(client.chat_postMessage_calls) == 1
@@ -127,9 +132,7 @@ def test_submit_converts_buddhist_era_dates(db):
         today=TODAY,
     )
 
-    row = db.execute(
-        "SELECT start_date, end_date FROM requests WHERE employee_id='U_SOLO'"
-    ).fetchone()
+    row = _persisted(db, "U_SOLO")
     assert row["start_date"] == date(2026, 6, 10)
     assert row["end_date"] == date(2026, 6, 11)
     # the calendar event uses the converted (Gregorian) date too
@@ -156,7 +159,6 @@ def test_submit_invalid_acks_errors_and_persists_nothing(db):
 
     assert ack.response["response_action"] == "errors"
     assert "end_date" in ack.response["errors"]
-    count = db.execute("SELECT count(*) AS n FROM requests").fetchone()["n"]
-    assert count == 0
+    assert _persisted(db, "U_ALICE") is None
     assert client.chat_postMessage_calls == []
     assert calendar.created == []

@@ -149,7 +149,7 @@ def build_cancel_modal(rows):
                 "type": "plain_text",
                 "text": f"{r['leave_type']} · {r['start_date']} → {r['end_date']} ({r['status']})"[:75],
             },
-            "value": str(r["id"]),
+            "value": str(r["request_id"]),
         }
         for r in rows
     ]
