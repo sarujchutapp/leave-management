@@ -38,19 +38,35 @@ Persistence is DynamoDB in on-demand (pay-per-request) mode — see [ADR-0001](d
 
 ## 5. Production deploy (HTTP mode on Lambda, via Terraform) — HITL
 
-Provisioned with Terraform from WSL; secrets live in SSM SecureString. See
+Provisioned with Terraform from WSL; remote state in S3, secrets in SSM SecureString. See
 [ADR-0003](docs/adr/0003-terraform-deploy-ssm-secrets.md) for the rationale and the
-`terraform/` module (delivered in issue #17). These are the manual steps a human runs:
+`terraform/` module. These are the manual steps a human runs.
+
+**One-time — create the Terraform state bucket.** It backs the S3 backend and is *not*
+managed by Terraform (chicken-and-egg). Run once per account, in `ap-southeast-7`:
+
+```
+aws s3api create-bucket --bucket your-tfstate-bucket \
+  --region ap-southeast-7 --create-bucket-configuration LocationConstraint=ap-southeast-7
+aws s3api put-bucket-versioning --bucket your-tfstate-bucket \
+  --versioning-configuration Status=Enabled
+aws s3api put-public-access-block --bucket your-tfstate-bucket \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-encryption --bucket your-tfstate-bucket \
+  --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+```
+
+Then the per-deploy steps:
 
 1. **Build the artifact** (in WSL, so wheels are Linux/x86_64): `cd terraform && ./build.sh`.
-2. **Provision** (in WSL): `terraform init` then `terraform apply`. First apply imports the
-   two existing DynamoDB tables and creates the Lambda, Function URL, IAM role, log group, and
-   the SSM parameters (with placeholder values).
+2. **Provision** (in WSL): `terraform init` (initializes the S3 backend) then `terraform apply`.
+   First apply imports the two existing DynamoDB tables and creates the Lambda, Function URL,
+   IAM role, log group, and the SSM parameters (with placeholder values).
 3. **Set the secret values out-of-band** (not in Terraform state):
    ```
-   aws ssm put-parameter --overwrite --type SecureString --name <slack-bot-token-param>     --value 'xoxb-...'
-   aws ssm put-parameter --overwrite --type SecureString --name <slack-signing-secret-param> --value '...'
-   aws ssm put-parameter --overwrite --type SecureString --name <google-sa-param>            --value file://service-account.json
+   aws ssm put-parameter --overwrite --type SecureString --name /leave-bot/slack-bot-token       --value 'xoxb-...'
+   aws ssm put-parameter --overwrite --type SecureString --name /leave-bot/slack-signing-secret  --value '...'
+   aws ssm put-parameter --overwrite --type SecureString --name /leave-bot/google-service-account --value file://service-account.json
    ```
 4. **Get the Function URL:** `terraform output function_url`.
 5. **Reconfigure the Slack app** (https://api.slack.com/apps → your app):

@@ -9,3 +9,12 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Terraform — local state + the built artifact (no secrets, but machine-local)
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+terraform/build/
+terraform/leave-bot.zip
