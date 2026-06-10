@@ -36,7 +36,32 @@ Persistence is DynamoDB in on-demand (pay-per-request) mode — see [ADR-0001](d
 3. `python -m leave.seed` — provisions both DynamoDB tables + the `by_employee` GSI (on-demand) and seeds proxy employees.
 4. `python smoke_check.py` — expect `PASS` on all three. The calendar check creates and immediately deletes a throwaway event tomorrow.
 
+## 5. Production deploy (HTTP mode on Lambda, via Terraform) — HITL
+
+Provisioned with Terraform from WSL; secrets live in SSM SecureString. See
+[ADR-0003](docs/adr/0003-terraform-deploy-ssm-secrets.md) for the rationale and the
+`terraform/` module (delivered in issue #17). These are the manual steps a human runs:
+
+1. **Build the artifact** (in WSL, so wheels are Linux/x86_64): `cd terraform && ./build.sh`.
+2. **Provision** (in WSL): `terraform init` then `terraform apply`. First apply imports the
+   two existing DynamoDB tables and creates the Lambda, Function URL, IAM role, log group, and
+   the SSM parameters (with placeholder values).
+3. **Set the secret values out-of-band** (not in Terraform state):
+   ```
+   aws ssm put-parameter --overwrite --type SecureString --name <slack-bot-token-param>     --value 'xoxb-...'
+   aws ssm put-parameter --overwrite --type SecureString --name <slack-signing-secret-param> --value '...'
+   aws ssm put-parameter --overwrite --type SecureString --name <google-sa-param>            --value file://service-account.json
+   ```
+4. **Get the Function URL:** `terraform output function_url`.
+5. **Reconfigure the Slack app** (https://api.slack.com/apps → your app):
+   - **Socket Mode** → toggle **off**.
+   - **Event Subscriptions** → set the **Request URL** to the Function URL.
+   - **Interactivity & Shortcuts** → set the **Request URL** to the Function URL.
+   - **Basic Information → App-Level Tokens** → delete the `connections:write` token (HTTP mode uses `SLACK_SIGNING_SECRET`, not the app-level token).
+6. **Verify:** `python smoke_check.py` (PASS on all three), then run `/dayoff` end-to-end
+   (submit → manager ticket → approve → calendar event) through the deployed Lambda.
+
 ## Run modes
 
 - **Local development — Socket Mode:** `python app.py`. Uses `SLACK_APP_TOKEN` and a persistent WebSocket; no public URL needed.
-- **Production — HTTP mode on AWS Lambda:** deploy `lambda_handler.handler` behind a Lambda Function URL and set the Slack app's Request/Interactivity URLs to it. This needs `SLACK_SIGNING_SECRET` (not the app-level token) and is scale-to-zero. Provisioning the Lambda + cutting Slack over is tracked in issue #17.
+- **Production — HTTP mode on AWS Lambda:** `lambda_handler.handler` behind a Lambda Function URL, provisioned by Terraform. Needs `SLACK_SIGNING_SECRET` (not the app-level token) and is scale-to-zero. See §5 above; tracked in issue #17.
