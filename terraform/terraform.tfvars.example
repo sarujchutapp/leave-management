@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Only the two required vars
+# are shown; the rest have defaults in variables.tf.
+aws_region       = "ap-southeast-1"
+team_calendar_id = "your-team-calendar-id@group.calendar.google.com"
