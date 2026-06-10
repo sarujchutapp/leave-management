@@ -20,8 +20,9 @@ live workspace. See ADR-0003 for the rationale.
 
 ## What to build
 
+- **One-time — create the Terraform state bucket (S3 backend):** create `your-tfstate-bucket` in `ap-southeast-7` (versioning on, public access blocked, SSE-S3) — not managed by Terraform. See SETUP.md §5.
 - **Build the artifact (WSL):** run `terraform/build.sh` so the zip is built with Linux/x86_64 wheels.
-- **Provision (WSL):** `terraform init` then `terraform apply` — the first apply imports the
+- **Provision (WSL):** `terraform init` (initializes the S3 backend) then `terraform apply` — the first apply imports the
   two existing DynamoDB tables and creates the Lambda, Function URL, IAM role, log group, and
   the SSM parameters (placeholder values).
 - **Set secret values out-of-band:** `aws ssm put-parameter --overwrite` for the three

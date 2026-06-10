@@ -1,7 +1,7 @@
 # Provision the Lambda deploy with Terraform; secrets in SSM SecureString
 
 We provision the production deploy with **Terraform** (a single flat root module under
-`terraform/`, local state) and keep the runtime secrets in **AWS SSM Parameter Store
+`terraform/`, S3 remote state) and keep the runtime secrets in **AWS SSM Parameter Store
 SecureString**, fetched on cold start. This is the **HITL deploy from #17**, expressed as
 infrastructure-as-code instead of console/CLI clicks, and it **resolves the open question
 ADR-0002 left** — "supply the Google service-account credentials … bundled in the artifact
@@ -28,8 +28,8 @@ Slack values into `os.environ` before `build_app()`, and writes the Google JSON 
 | 2 | Packaging | Zip via `archive_file`; built in **WSL** (Linux/x86_64 wheels) |
 | 3 | Secrets | **SSM Parameter Store SecureString** ($0, out of state); upgrade-to-Secrets-Manager noted |
 | 4 | Google creds | Fetched from SSM, written to `/tmp/service-account.json`; only `lambda_handler.py` changes |
-| 5 | TF state | Local, gitignored; → S3 when CI/2nd operator appears |
-| 6 | Code layout | One flat root module in `terraform/`; aws `~> 5.0`, TF `>= 1.5` |
+| 5 | TF state | **S3 backend** (`your-tfstate-bucket`, key `leave-management/terraform.tfstate`); native lockfile (`use_lockfile`); bucket bootstrapped out-of-band |
+| 6 | Code layout | One flat root module in `terraform/`; aws `~> 5.0`, TF `>= 1.10` |
 | 7 | Runtime knobs | `python3.12`, `x86_64`, 256 MB, 30 s timeout |
 | 8 | IAM | Least-privilege scoped policy (no `DeleteItem`, KMS via-SSM condition, self-invoke) |
 | 9 | Build wiring | Decoupled `build.sh` + `terraform apply`, both from WSL |
@@ -38,7 +38,13 @@ Slack values into `os.environ` before `build_app()`, and writes the Google JSON 
 ## Shape
 
 - Flat root module: `versions.tf`, `variables.tf`, `main.tf`, `outputs.tf` (the Function URL),
-  `terraform.tfvars` (gitignored). Provider `aws ~> 5.0`, Terraform `>= 1.5` (for `import`).
+  `terraform.tfvars` (gitignored). Provider `aws ~> 5.0`, Terraform `>= 1.10` (for `import`
+  blocks and native S3 state locking).
+- Remote state in an **S3 backend** with `use_lockfile = true` (native lockfile — no DynamoDB
+  lock table) and `encrypt = true`. The state bucket
+  (`your-tfstate-bucket`: versioning on, all public access blocked, SSE-S3)
+  is created **once out-of-band** and is *not* managed by Terraform. The backend block is
+  hardcoded literals (Terraform backends can't take variables).
 - Runtime: `python3.12`, `x86_64`, 256 MB, 30 s timeout (above Slack's 3 s so the lazy work
   finishes). The zip is built in **WSL** (`terraform/build.sh`) so wheels are Linux/x86_64;
   `boto3`/`moto`/`pytest` are excluded. `build.sh` then `terraform apply`, both from WSL.
@@ -62,12 +68,17 @@ Slack values into `os.environ` before `build_app()`, and writes the Google JSON 
   `aws/ssm` key is $0.
 - **Manual console/CLI deploy** (the original #17 framing) — works, but isn't reproducible or
   reviewable.
-- **S3 remote state** — durable and CI-ready, but a bootstrap chore and no gain for a single
-  operator; local state is structurally $0.
+- **Local state** — simplest and structurally $0, and was the initial choice while this was a
+  solo deploy. Superseded once S3 access was available: remote state is durable and shareable,
+  the right base for CI or a second operator, and effectively $0 anyway (a few KB in S3).
+- **DynamoDB lock table** for state locking — the long-standing mechanism, but an extra
+  bootstrapped resource; the native S3 lockfile (Terraform 1.10+) supersedes it.
 
 ## Consequences
 
-- Local `terraform.tfstate*` must be gitignored (it holds infra metadata, no secrets).
+- The state bucket must exist before the first `terraform init` (one-time out-of-band CLI
+  bootstrap). `.terraform/` and `terraform.tfvars` are gitignored; state lives in S3, not in
+  the repo.
 - Secret values are **not** recreated by `apply` — after `apply`, set them once via CLI; a
   `terraform destroy`/rebuild needs that step repeated.
 - `lambda_handler.py` gains an SSM fetch + `/tmp` write on cold start (adds a little cold-start
@@ -75,5 +86,5 @@ Slack values into `os.environ` before `build_app()`, and writes the Google JSON 
 - Cutover stays partly HITL: the Slack app dashboard (disable Socket Mode, set the Request +
   Interactivity URLs to the Function URL, remove the app-level token) can't be Terraformed, and
   the Request URL doesn't exist until the Lambda + Function URL do.
-- Upgrade triggers: move state to **S3** when CI or a second operator appears; move secrets to
-  **Secrets Manager** if rotation is needed.
+- Upgrade trigger: move secrets to **Secrets Manager** if rotation is needed. (Remote state on
+  S3 is now adopted, so that earlier upgrade trigger is done.)
