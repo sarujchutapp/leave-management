@@ -35,3 +35,8 @@ Persistence is DynamoDB in on-demand (pay-per-request) mode — see [ADR-0001](d
 2. `python -m venv .venv && .venv\Scripts\activate` (Windows PowerShell) then `pip install -r requirements.txt`.
 3. `python -m leave.seed` — provisions both DynamoDB tables + the `by_employee` GSI (on-demand) and seeds proxy employees.
 4. `python smoke_check.py` — expect `PASS` on all three. The calendar check creates and immediately deletes a throwaway event tomorrow.
+
+## Run modes
+
+- **Local development — Socket Mode:** `python app.py`. Uses `SLACK_APP_TOKEN` and a persistent WebSocket; no public URL needed.
+- **Production — HTTP mode on AWS Lambda:** deploy `lambda_handler.handler` behind a Lambda Function URL and set the Slack app's Request/Interactivity URLs to it. This needs `SLACK_SIGNING_SECRET` (not the app-level token) and is scale-to-zero. Provisioning the Lambda + cutting Slack over is tracked in issue #17.

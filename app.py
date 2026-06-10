@@ -1,4 +1,11 @@
-"""Entrypoint: build the Bolt app and run it over Socket Mode."""
+"""Bolt app factory + the Socket Mode entrypoint used for local development.
+
+`build_app()` is shared by both run modes:
+- Local dev: `python app.py` runs it over Socket Mode (a persistent WebSocket).
+- Production: `lambda_handler.handler` runs it over HTTP on AWS Lambda — see
+  issue #17. Pass `faas=True` there so the slow handlers run as lazy listeners
+  and the App responds before processing (required on FaaS).
+"""
 
 import os
 
@@ -28,44 +35,84 @@ from leave.handlers import (
 load_dotenv()
 
 
-def build_app():
-    app = App(token=os.environ["SLACK_BOT_TOKEN"])
-    calendar = CalendarClient.from_env()
+def _ack(ack):
+    ack()
 
+
+def _noop_ack(*args, **kwargs):
+    """Ack placeholder for handlers invoked as lazy listeners — the real ack
+    already ran in the ack phase, so the handler's own ack() call is a no-op."""
+
+
+def build_app(calendar=None, faas=False):
+    app = App(
+        token=os.environ["SLACK_BOT_TOKEN"],
+        signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
+        process_before_response=faas,
+        # smoke_check.py validates the bot token; skipping the startup auth.test
+        # keeps Socket Mode fast and avoids a network call on every Lambda cold start.
+        token_verification_enabled=False,
+    )
+    calendar = calendar or CalendarClient.from_env()
+
+    # These open modals (need the trigger_id within 3s) or return validation errors
+    # in the ack itself, so they must run synchronously, not as lazy listeners.
     @app.command("/dayoff")
     def _open(ack, body, client):
-        with db.connect() as conn:
-            open_leave_modal(ack, body, client, conn)
-
-    @app.view(LEAVE_CALLBACK_ID)
-    def _submit(ack, body, view, client):
-        with db.connect() as conn:
-            submit_leave(ack, body, view, client, conn, calendar)
-
-    @app.action(APPROVE_ACTION)
-    def _approve(ack, body, client):
-        with db.connect() as conn:
-            handle_approve(ack, body, client, conn, calendar)
-
-    @app.action(DECLINE_ACTION)
-    def _decline_click(ack, body, client):
-        with db.connect() as conn:
-            handle_decline_click(ack, body, client, conn)
-
-    @app.view(DECLINE_CALLBACK_ID)
-    def _decline_submit(ack, body, view, client):
-        with db.connect() as conn:
-            handle_decline_submit(ack, body, view, client, conn)
+        with db.connect() as d:
+            open_leave_modal(ack, body, client, d)
 
     @app.command("/dayoff-cancel")
     def _open_cancel(ack, body, client):
-        with db.connect() as conn:
-            open_cancel_modal(ack, body, client, conn)
+        with db.connect() as d:
+            open_cancel_modal(ack, body, client, d)
 
-    @app.view(CANCEL_CALLBACK_ID)
-    def _submit_cancel(ack, body, view, client):
-        with db.connect() as conn:
-            submit_cancel(ack, body, view, client, conn, calendar)
+    @app.action(DECLINE_ACTION)
+    def _decline_click(ack, body, client):
+        with db.connect() as d:
+            handle_decline_click(ack, body, client, d)
+
+    @app.view(LEAVE_CALLBACK_ID)
+    def _submit(ack, body, view, client):
+        with db.connect() as d:
+            submit_leave(ack, body, view, client, d, calendar)
+
+    # Approve / decline-submit / cancel do the slow post-ack work (Google Calendar
+    # API calls, manager DMs). On Lambda they run as lazy listeners so the ack still
+    # returns within Slack's 3s window; in Socket Mode they run inline as before.
+    if faas:
+
+        def _approve_lazy(body, client):
+            with db.connect() as d:
+                handle_approve(_noop_ack, body, client, d, calendar)
+
+        def _decline_submit_lazy(body, view, client):
+            with db.connect() as d:
+                handle_decline_submit(_noop_ack, body, view, client, d)
+
+        def _cancel_lazy(body, view, client):
+            with db.connect() as d:
+                submit_cancel(_noop_ack, body, view, client, d, calendar)
+
+        app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
+        app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
+        app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
+    else:
+
+        @app.action(APPROVE_ACTION)
+        def _approve(ack, body, client):
+            with db.connect() as d:
+                handle_approve(ack, body, client, d, calendar)
+
+        @app.view(DECLINE_CALLBACK_ID)
+        def _decline_submit(ack, body, view, client):
+            with db.connect() as d:
+                handle_decline_submit(ack, body, view, client, d)
+
+        @app.view(CANCEL_CALLBACK_ID)
+        def _cancel(ack, body, view, client):
+            with db.connect() as d:
+                submit_cancel(ack, body, view, client, d, calendar)
 
     return app
 
