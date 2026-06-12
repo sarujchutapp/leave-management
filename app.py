@@ -53,7 +53,19 @@ def build_app(calendar=None, faas=False):
         # keeps Socket Mode fast and avoids a network call on every Lambda cold start.
         token_verification_enabled=False,
     )
-    calendar = calendar or CalendarClient.from_env()
+    # Build the Google Calendar client lazily. Only the approve / cancel / auto-approve
+    # paths use it, and `CalendarClient.from_env()` runs `discovery.build`, which is slow.
+    # Building it eagerly here would add that cost to every cold start — including the
+    # `/dayoff` modal open, which never touches the calendar — and can trip Slack's 3s
+    # ack window. An injected client (tests) is used as-is; otherwise it's constructed on
+    # first use and reused for the life of the warm instance.
+    _calendar = calendar
+
+    def get_calendar():
+        nonlocal _calendar
+        if _calendar is None:
+            _calendar = CalendarClient.from_env()
+        return _calendar
 
     # These open modals (need the trigger_id within 3s) or return validation errors
     # in the ack itself, so they must run synchronously, not as lazy listeners.
@@ -75,7 +87,7 @@ def build_app(calendar=None, faas=False):
     @app.view(LEAVE_CALLBACK_ID)
     def _submit(ack, body, view, client):
         with db.connect() as d:
-            submit_leave(ack, body, view, client, d, calendar)
+            submit_leave(ack, body, view, client, d, get_calendar())
 
     # Approve / decline-submit / cancel do the slow post-ack work (Google Calendar
     # API calls, manager DMs). On Lambda they run as lazy listeners so the ack still
@@ -84,7 +96,7 @@ def build_app(calendar=None, faas=False):
 
         def _approve_lazy(body, client):
             with db.connect() as d:
-                handle_approve(_noop_ack, body, client, d, calendar)
+                handle_approve(_noop_ack, body, client, d, get_calendar())
 
         def _decline_submit_lazy(body, view, client):
             with db.connect() as d:
@@ -92,7 +104,7 @@ def build_app(calendar=None, faas=False):
 
         def _cancel_lazy(body, view, client):
             with db.connect() as d:
-                submit_cancel(_noop_ack, body, view, client, d, calendar)
+                submit_cancel(_noop_ack, body, view, client, d, get_calendar())
 
         app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
@@ -102,7 +114,7 @@ def build_app(calendar=None, faas=False):
         @app.action(APPROVE_ACTION)
         def _approve(ack, body, client):
             with db.connect() as d:
-                handle_approve(ack, body, client, d, calendar)
+                handle_approve(ack, body, client, d, get_calendar())
 
         @app.view(DECLINE_CALLBACK_ID)
         def _decline_submit(ack, body, view, client):
@@ -112,7 +124,7 @@ def build_app(calendar=None, faas=False):
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):
             with db.connect() as d:
-                submit_cancel(ack, body, view, client, d, calendar)
+                submit_cancel(ack, body, view, client, d, get_calendar())
 
     return app
 
