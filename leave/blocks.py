@@ -47,7 +47,9 @@ def build_leave_modal(balances=None):
             {
                 "type": "input",
                 "block_id": "end_date",
+                "optional": True,
                 "label": {"type": "plain_text", "text": "End date"},
+                "hint": {"type": "plain_text", "text": "Leave empty for a single-day leave."},
                 "element": {"type": "datepicker", "action_id": "value"},
             },
             {

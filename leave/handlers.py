@@ -59,7 +59,9 @@ def _parse_submission(view):
     values = view["state"]["values"]
     leave_type = values["leave_type"]["value"]["selected_option"]["value"]
     start = _to_gregorian(date.fromisoformat(values["start_date"]["value"]["selected_date"]))
-    end = _to_gregorian(date.fromisoformat(values["end_date"]["value"]["selected_date"]))
+    # End date is optional: blank means a single-day leave, so default it to start.
+    end_raw = values.get("end_date", {}).get("value", {}).get("selected_date")
+    end = _to_gregorian(date.fromisoformat(end_raw)) if end_raw else start
     reason = values["reason"]["value"].get("value")
     return leave_type, start, end, reason
 

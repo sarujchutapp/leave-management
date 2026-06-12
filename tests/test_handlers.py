@@ -116,6 +116,28 @@ def test_submit_auto_approves_when_no_manager(db):
     assert row["calendar_event_id"] == calendar.created[0]["id"]
 
 
+def test_submit_single_day_defaults_end_to_start(db):
+    # End date is optional; leaving it blank means a one-day leave (end = start).
+    upsert_employee(db, "U_SOLO", "Solo", None)
+    calendar = FakeCalendar()
+    view = make_leave_view("vacation", "2026-06-10", None)  # no end date selected
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=FakeSlackClient(),
+        db=db,
+        calendar=calendar,
+        today=TODAY,
+    )
+
+    row = _persisted(db, "U_SOLO")
+    assert row["start_date"] == date(2026, 6, 10)
+    assert row["end_date"] == date(2026, 6, 10)
+    assert calendar.created[0]["end"] == date(2026, 6, 10)
+
+
 def test_submit_converts_buddhist_era_dates(db):
     # Thai-locale Slack date pickers send Buddhist-era years (CE + 543).
     upsert_employee(db, "U_SOLO", "Solo", None)
