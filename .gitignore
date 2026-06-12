@@ -10,6 +10,12 @@ __pycache__/
 .venv/
 venv/
 
+# Operator-local files — real employee ids, role-assume helper, generated policy
+add_employees.py
+arn.sh
+terraform/operator-policy.json
+image*.png
+
 # Terraform — local state + the built artifact (no secrets, but machine-local)
 terraform/.terraform/
 terraform/.terraform.lock.hcl
