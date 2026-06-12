@@ -11,6 +11,7 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_sdk.signature import SignatureVerifier
 
 from app import build_app
+from leave.calendar_client import CalendarClient
 from tests.fakes import FakeCalendar
 
 SIGNING_SECRET = "test-signing-secret"
@@ -49,6 +50,19 @@ def test_build_app_constructs_in_both_modes():
     assert build_app(calendar=FakeCalendar(), faas=False) is not None
     faas_app = build_app(calendar=FakeCalendar(), faas=True)
     assert faas_app.process_before_response is True
+
+
+def test_build_app_does_not_eagerly_build_calendar(monkeypatch):
+    """The cold-start path (build_app) must not construct the Google Calendar client:
+    `discovery.build` is slow and the /dayoff modal-open path never uses the calendar,
+    so building it eagerly risks tripping Slack's 3s ack window. It's built lazily on
+    first approve/cancel/auto-approve instead."""
+    calls = []
+    monkeypatch.setattr(
+        CalendarClient, "from_env", classmethod(lambda cls: calls.append(1) or FakeCalendar())
+    )
+    build_app(faas=True)  # no calendar injected → would build eagerly if not lazy
+    assert calls == []
 
 
 def test_signed_request_is_accepted():

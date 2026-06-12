@@ -154,8 +154,11 @@ resource "aws_lambda_function" "leave_bot" {
   runtime       = "python3.12"
   handler       = "lambda_handler.handler"
   architectures = ["x86_64"]
-  memory_size   = 256
-  timeout       = 30
+  # 512 MB (not 256) — memory scales CPU proportionally, so cold-start imports build
+  # faster and the synchronous /dayoff modal-open path stays within Slack's 3s ack
+  # window. Still within the free tier at this volume.
+  memory_size = 512
+  timeout     = 30
 
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
