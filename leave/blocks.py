@@ -54,7 +54,7 @@ def build_leave_modal(balances=None):
                 "type": "input",
                 "block_id": "reason",
                 "optional": True,
-                "label": {"type": "plain_text", "text": "Reason (optional)"},
+                "label": {"type": "plain_text", "text": "Reason"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "value",
@@ -121,7 +121,7 @@ def build_decline_modal(private_metadata):
                 "type": "input",
                 "block_id": "decline_reason",
                 "optional": True,
-                "label": {"type": "plain_text", "text": "Reason (optional)"},
+                "label": {"type": "plain_text", "text": "Reason"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "value",
