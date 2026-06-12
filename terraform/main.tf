@@ -193,6 +193,19 @@ resource "aws_lambda_permission" "function_url" {
   function_url_auth_type = "NONE"
 }
 
+# An auth-type-NONE Function URL also needs lambda:InvokeFunction granted to the
+# public principal (per the AWS console's own guidance); with only InvokeFunctionUrl
+# the URL returns 403 AccessDeniedException before the function runs. The
+# FunctionUrlAuthType condition is only valid on InvokeFunctionUrl, so this grant
+# is unconditioned — abuse is bounded by the in-process Slack signature check, which
+# rejects any request (direct invoke included) that isn't a validly signed Slack call.
+resource "aws_lambda_permission" "function_invoke" {
+  statement_id  = "AllowPublicFunctionInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.leave_bot.function_name
+  principal     = "*"
+}
+
 # --- Secrets (declared as code; real values set out-of-band in #17) ------------
 resource "aws_ssm_parameter" "slack_bot_token" {
   name  = local.ssm_bot_token_param
