@@ -62,6 +62,35 @@ def remaining_balance(db, employee, leave_type, today):
     return allowance - used
 
 
+def approved_weekdays_by_type_this_year(db, employee_id, today):
+    """Approved weekdays per leave type for the current calendar year, from a single
+    `by_employee` query. Lets callers that need every type (the /dayoff modal) avoid
+    one query per type."""
+    year_start = date(today.year, 1, 1).isoformat()
+    year_end = date(today.year, 12, 31).isoformat()
+    resp = db.requests.query(
+        IndexName=db.by_employee_index,
+        KeyConditionExpression=Key("employee_id").eq(employee_id)
+        & Key("start_date").between(year_start, year_end),
+    )
+    totals = {}
+    for r in resp["Items"]:
+        if r["status"] != "approved":
+            continue
+        days = count_weekdays(
+            date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"])
+        )
+        totals[r["leave_type"]] = totals.get(r["leave_type"], 0) + days
+    return totals
+
+
+def remaining_balances(db, employee, today):
+    """All leave types' remaining balance, derived from a single year query (vs
+    `remaining_balance` per type)."""
+    used = approved_weekdays_by_type_this_year(db, employee["slack_user_id"], today)
+    return {t: int(allowance) - used.get(t, 0) for t, allowance in employee["allowances"].items()}
+
+
 def has_overlap(db, employee_id, start, end):
     """True if the range overlaps any of the employee's pending/approved requests."""
     for r in _by_employee(db, employee_id):

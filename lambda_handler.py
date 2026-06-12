@@ -27,23 +27,30 @@ _handler = None
 _secrets_loaded = False
 
 
-def _fetch(ssm, param_name):
-    return ssm.get_parameter(Name=param_name, WithDecryption=True)["Parameter"]["Value"]
-
-
 def load_secrets_from_ssm():
     """Fetch the Slack tokens and Google service-account JSON from SSM and place
     them where the app expects: the Slack creds in the process environment (read
     by `build_app()`), the Google JSON in a file on disk (read by
-    `CalendarClient.from_env()` via `GOOGLE_SERVICE_ACCOUNT_FILE`)."""
-    ssm = boto3.client("ssm", region_name=os.environ.get("AWS_REGION"))
+    `CalendarClient.from_env()` via `GOOGLE_SERVICE_ACCOUNT_FILE`).
 
-    os.environ["SLACK_BOT_TOKEN"] = _fetch(ssm, os.environ[BOT_TOKEN_PARAM_ENV])
-    os.environ["SLACK_SIGNING_SECRET"] = _fetch(ssm, os.environ[SIGNING_SECRET_PARAM_ENV])
+    One batched `get_parameters` call rather than three sequential round-trips —
+    those add up on the cold-start critical path (before the ack)."""
+    ssm = boto3.client("ssm", region_name=os.environ.get("AWS_REGION"))
+    bot_param = os.environ[BOT_TOKEN_PARAM_ENV]
+    signing_param = os.environ[SIGNING_SECRET_PARAM_ENV]
+    google_param = os.environ[GOOGLE_SA_PARAM_ENV]
+
+    resp = ssm.get_parameters(
+        Names=[bot_param, signing_param, google_param], WithDecryption=True
+    )
+    values = {p["Name"]: p["Value"] for p in resp["Parameters"]}
+
+    os.environ["SLACK_BOT_TOKEN"] = values[bot_param]
+    os.environ["SLACK_SIGNING_SECRET"] = values[signing_param]
 
     sa_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", DEFAULT_SERVICE_ACCOUNT_FILE)
     with open(sa_file, "w") as f:
-        f.write(_fetch(ssm, os.environ[GOOGLE_SA_PARAM_ENV]))
+        f.write(values[google_param])
     os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"] = sa_file
 
 

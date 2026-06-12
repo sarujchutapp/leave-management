@@ -9,6 +9,7 @@ from leave.requests import (
     get_request,
     has_overlap,
     remaining_balance,
+    remaining_balances,
 )
 from leave.seed import upsert_employee
 
@@ -31,6 +32,14 @@ def test_remaining_balance_subtracts_approved_weekdays(db):
     approve_request(db, rid)
     # Wed-Fri = 3 weekdays
     assert remaining_balance(db, alice, "vacation", TODAY) == 7
+
+
+def test_remaining_balances_returns_all_types_from_one_query(db):
+    # The /dayoff modal path: every type's balance from a single by_employee query.
+    alice = _alice(db)
+    rid = create_request(db, "U_ALICE", "vacation", date(2026, 6, 10), date(2026, 6, 12), None)
+    approve_request(db, rid)  # Wed-Fri = 3 weekdays
+    assert remaining_balances(db, alice, TODAY) == {"sick": 30, "vacation": 7, "personal": 5}
 
 
 def test_approved_in_other_year_does_not_count(db):

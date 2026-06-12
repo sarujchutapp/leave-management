@@ -8,7 +8,6 @@ import json
 from datetime import date
 
 from leave.blocks import (
-    LEAVE_TYPES,
     build_cancel_modal,
     build_decision_notice,
     build_decline_modal,
@@ -25,6 +24,7 @@ from leave.requests import (
     decline_request,
     get_request,
     remaining_balance,
+    remaining_balances,
     set_calendar_event_id,
     set_ticket_ref,
 )
@@ -43,7 +43,7 @@ def open_leave_modal(ack, body, client, db, today=None):
         ack(CONTACT_ADMIN)
         return
     ack()
-    balances = {t: remaining_balance(db, employee, t, today) for t in LEAVE_TYPES}
+    balances = remaining_balances(db, employee, today)
     client.views_open(trigger_id=body["trigger_id"], view=build_leave_modal(balances))
 
 
