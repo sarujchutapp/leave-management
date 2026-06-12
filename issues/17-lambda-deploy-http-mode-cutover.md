@@ -22,20 +22,26 @@ live workspace. See ADR-0003 for the rationale.
 
 - **One-time — create the Terraform state bucket (S3 backend):** create `your-tfstate-bucket` in `ap-southeast-7` (versioning on, public access blocked, SSE-S3) — not managed by Terraform. See SETUP.md §5.
 - **Build the artifact (WSL):** run `terraform/build.sh` so the zip is built with Linux/x86_64 wheels.
-- **Provision (WSL):** `terraform init` (initializes the S3 backend) then `terraform apply` — the first apply imports the
-  two existing DynamoDB tables and creates the Lambda, Function URL, IAM role, log group, and
-  the SSM parameters (placeholder values).
-- **Set secret values out-of-band:** `aws ssm put-parameter --overwrite` for the three
-  parameters (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and the Google JSON via
+- **Provision (WSL):** `terraform init` (initializes the S3 backend) then `terraform apply` — creates
+  the two DynamoDB tables, the Lambda, Function URL, IAM role, log group, and the SSM parameters
+  (placeholder values). Resources run in `ap-southeast-1` (Function URLs aren't supported in
+  `ap-southeast-7`). #15 was never run, so the tables didn't pre-exist; if they ever do,
+  `terraform import` them first so they're adopted, not recreated.
+- **Function URL public access:** the auth-`NONE` URL needs **both** `lambda:InvokeFunctionUrl`
+  **and** `lambda:InvokeFunction` granted to `*` (AWS requirement since ~Oct 2025); the module
+  includes both. Without the second, the URL returns `403` before the function runs.
+- **Set secret values out-of-band** (in `ap-southeast-1`): `aws ssm put-parameter --overwrite` for
+  the three parameters (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and the Google JSON via
   `--value file://service-account.json`) — so the real values never enter Terraform state.
-- **Slack dashboard (manual):** **disable Socket Mode**, set the **Request URL** (Event
-  Subscriptions) and **Interactivity Request URL** to the Function URL (`terraform output`),
-  and remove the app-level token.
+- **Slack dashboard (manual):** **disable Socket Mode**, set the **Interactivity** Request URL and
+  the **Slash Command** URLs (`/dayoff`, `/dayoff-cancel`) to the Function URL (`terraform output`),
+  and remove the app-level token. This bot uses slash commands + interactivity only — *not* Event
+  Subscriptions.
 - **Verify:** `smoke_check.py` PASS, then `/dayoff` end-to-end through the deployed Lambda.
 
 ## Acceptance criteria
 
-- [ ] `terraform apply` imports the two tables and provisions the Lambda + least-privilege IAM role (no static AWS keys in prod)
+- [ ] `terraform apply` creates the two tables and provisions the Lambda + least-privilege IAM role (no static AWS keys in prod)
 - [ ] The three SSM SecureString values are set out-of-band; no secrets in Terraform state
 - [ ] Function URL live; Slack app switched to HTTP mode (Request + Interactivity URLs set), app-level token removed
 - [ ] `/dayoff` works end-to-end (submit → manager ticket → approve → calendar event) via the Lambda

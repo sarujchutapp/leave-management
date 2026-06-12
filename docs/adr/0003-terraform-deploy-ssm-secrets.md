@@ -8,10 +8,11 @@ ADR-0002 left** — "supply the Google service-account credentials … bundled i
 or via Secrets Manager / SSM — decided in #17."
 
 Terraform owns the AWS infrastructure: the Lambda, its Function URL, a least-privilege IAM
-role, and the two DynamoDB tables. The live tables already exist (provisioned in #15), so
-Terraform **adopts them via `terraform import`** rather than recreating — one tool owns prod
-infra, while `seed.create_tables()` stays as the moto-test provisioner and employee seeding
-stays a Python data step.
+role, and the two DynamoDB tables. (The plan was to `terraform import` tables pre-provisioned
+in #15, but #15 was never run, so the tables didn't exist and Terraform **created** them
+directly — one tool owns prod infra either way.) `seed.create_tables()` stays as the moto-test
+provisioner, and employee seeding stays a Python data step run **as the human operator** (the
+deploy role has no `PutItem` — it manages infra, not data).
 
 Secrets (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and the Google service-account JSON) are
 SSM SecureString parameters. `lambda_handler.py` fetches them on cold start, sets the two
@@ -24,7 +25,7 @@ Slack values into `os.environ` before `build_app()`, and writes the Google JSON 
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | Infra ownership | Terraform owns DynamoDB tables; **import** the 2 live ones; `seed.create_tables()` → moto tests only |
+| 1 | Infra ownership | Terraform owns + **creates** the 2 DynamoDB tables (#15 never ran, so none pre-existed to import); `seed.create_tables()` → moto tests only |
 | 2 | Packaging | Zip via `archive_file`; built in **WSL** (Linux/x86_64 wheels) |
 | 3 | Secrets | **SSM Parameter Store SecureString** ($0, out of state); upgrade-to-Secrets-Manager noted |
 | 4 | Google creds | Fetched from SSM, written to `/tmp/service-account.json`; only `lambda_handler.py` changes |
@@ -38,8 +39,19 @@ Slack values into `os.environ` before `build_app()`, and writes the Google JSON 
 ## Shape
 
 - Flat root module: `versions.tf`, `variables.tf`, `main.tf`, `outputs.tf` (the Function URL),
-  `terraform.tfvars` (gitignored). Provider `aws ~> 5.0`, Terraform `>= 1.10` (for `import`
-  blocks and native S3 state locking).
+  `terraform.tfvars` (gitignored). Provider `aws ~> 5.0`, Terraform `>= 1.10` (for native S3
+  state locking).
+- Resources run in **`ap-southeast-1`** (Singapore). The account's home region `ap-southeast-7`
+  (Bangkok) was the first target, but Lambda **Function URLs aren't supported there yet** (it
+  returns "FunctionUrlAuthType is not supported in this region"), so compute + data moved to
+  `ap-southeast-1`. The Terraform **state bucket stays in `ap-southeast-7`** — a backend's region
+  is independent of where resources live.
+- The auth-type-`NONE` Function URL needs **two** resource-based grants to principal `*`:
+  `lambda:InvokeFunctionUrl` **and** `lambda:InvokeFunction` (an AWS requirement since ~Oct 2025;
+  with only the former the URL returns `403 AccessDenied` *before* the function runs).
+  `aws_lambda_permission` can't express the tighter `lambda:InvokedViaFunctionUrl` Bool condition,
+  so the `InvokeFunction` grant is unconditioned — Slack's in-process signature check is the real
+  authenticator, so a direct invoke with an unsigned body is still rejected.
 - Remote state in an **S3 backend** with `use_lockfile = true` (native lockfile — no DynamoDB
   lock table) and `encrypt = true`. The state bucket
   (`your-tfstate-bucket`: versioning on, all public access blocked, SSE-S3)

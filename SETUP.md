@@ -42,6 +42,10 @@ Provisioned with Terraform from WSL; remote state in S3, secrets in SSM SecureSt
 [ADR-0003](docs/adr/0003-terraform-deploy-ssm-secrets.md) for the rationale and the
 `terraform/` module. These are the manual steps a human runs.
 
+**Region:** resources run in **`ap-southeast-1`** (Singapore) — set in `terraform.tfvars`. The
+state bucket lives in `ap-southeast-7` (created below). `ap-southeast-7` can't host the Lambda
+because Function URLs aren't supported there yet.
+
 **One-time — create the Terraform state bucket.** It backs the S3 backend and is *not*
 managed by Terraform (chicken-and-egg). Run once per account, in `ap-southeast-7`:
 
@@ -60,19 +64,23 @@ Then the per-deploy steps:
 
 1. **Build the artifact** (in WSL, so wheels are Linux/x86_64): `cd terraform && ./build.sh`.
 2. **Provision** (in WSL): `terraform init` (initializes the S3 backend) then `terraform apply`.
-   First apply imports the two existing DynamoDB tables and creates the Lambda, Function URL,
-   IAM role, log group, and the SSM parameters (with placeholder values).
-3. **Set the secret values out-of-band** (not in Terraform state):
+   It creates the two DynamoDB tables, the Lambda, Function URL, IAM role, log group, and the
+   SSM parameters (with placeholder values). (If the tables ever pre-exist — e.g. from #15 — run
+   `terraform import aws_dynamodb_table.employees leave_employees` / `... .requests leave_requests`
+   first so they're adopted, not recreated.)
+3. **Set the secret values out-of-band** (not in Terraform state), in `ap-southeast-1`:
    ```
-   aws ssm put-parameter --overwrite --type SecureString --name /leave-bot/slack-bot-token       --value 'xoxb-...'
-   aws ssm put-parameter --overwrite --type SecureString --name /leave-bot/slack-signing-secret  --value '...'
-   aws ssm put-parameter --overwrite --type SecureString --name /leave-bot/google-service-account --value file://service-account.json
+   aws ssm put-parameter --region ap-southeast-1 --overwrite --type SecureString --name /leave-bot/slack-bot-token        --value 'xoxb-...'
+   aws ssm put-parameter --region ap-southeast-1 --overwrite --type SecureString --name /leave-bot/slack-signing-secret   --value '...'
+   aws ssm put-parameter --region ap-southeast-1 --overwrite --type SecureString --name /leave-bot/google-service-account --value file://service-account.json
    ```
 4. **Get the Function URL:** `terraform output function_url`.
-5. **Reconfigure the Slack app** (https://api.slack.com/apps → your app):
-   - **Socket Mode** → toggle **off**.
-   - **Event Subscriptions** → set the **Request URL** to the Function URL.
-   - **Interactivity & Shortcuts** → set the **Request URL** to the Function URL.
+5. **Reconfigure the Slack app** (https://api.slack.com/apps → your app). This bot uses **slash
+   commands + interactivity only** — *not* the Events API, so leave **Event Subscriptions** off:
+   - **Socket Mode** → toggle **off** (do this first — the URL fields stay greyed out otherwise).
+   - **Interactivity & Shortcuts** → set the **Request URL** to the Function URL (carries modal
+     submits + the approve/decline buttons).
+   - **Slash Commands** → set the **Request URL** on both `/dayoff` and `/dayoff-cancel`.
    - **Basic Information → App-Level Tokens** → delete the `connections:write` token (HTTP mode uses `SLACK_SIGNING_SECRET`, not the app-level token).
 6. **Verify:** `python smoke_check.py` (PASS on all three), then run `/dayoff` end-to-end
    (submit → manager ticket → approve → calendar event) through the deployed Lambda.
