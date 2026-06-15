@@ -2,6 +2,7 @@
 .env
 service-account.json
 manager-request.md
+V2_requirement.md
 prompt.md
 
 # Python
