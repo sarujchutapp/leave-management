@@ -6,9 +6,6 @@ Injected into handlers so tests can substitute a fake.
 import os
 from datetime import timedelta
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
@@ -19,6 +16,12 @@ class CalendarClient:
 
     @classmethod
     def from_env(cls):
+        # Imported here, not at module load, so cold-start paths that never build a
+        # calendar client — e.g. opening the /dayoff modal — don't pay for the heavy
+        # google-api-python-client import (it dominated cold-start Init Duration).
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
         creds = service_account.Credentials.from_service_account_file(
             os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"], scopes=SCOPES
         )
