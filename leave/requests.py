@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 
 from boto3.dynamodb.conditions import Key
 
-from leave.balance import count_weekdays
+from leave.balance import request_days
 
 
 def _now_iso():
@@ -49,7 +49,9 @@ def approved_weekdays_this_year(db, employee_id, leave_type, today):
         & Key("start_date").between(year_start, year_end),
     )
     return sum(
-        count_weekdays(date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]))
+        request_days(
+            date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]), r.get("half")
+        )
         for r in resp["Items"]
         if r["status"] == "approved" and r["leave_type"] == leave_type
     )
@@ -77,8 +79,8 @@ def approved_weekdays_by_type_this_year(db, employee_id, today):
     for r in resp["Items"]:
         if r["status"] != "approved":
             continue
-        days = count_weekdays(
-            date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"])
+        days = request_days(
+            date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]), r.get("half")
         )
         totals[r["leave_type"]] = totals.get(r["leave_type"], 0) + days
     return totals
@@ -101,7 +103,7 @@ def has_overlap(db, employee_id, start, end):
     return False
 
 
-def create_request(db, employee_id, leave_type, start, end, reason):
+def create_request(db, employee_id, leave_type, start, end, reason, half=None):
     request_id = uuid.uuid4().hex
     now = _now_iso()
     db.requests.put_item(
@@ -111,6 +113,7 @@ def create_request(db, employee_id, leave_type, start, end, reason):
             "leave_type": leave_type,
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
+            "half": half,
             "status": "pending",
             "reason": reason,
             "decline_reason": None,

@@ -15,3 +15,12 @@ def count_weekdays(start, end):
             days += 1
         current += timedelta(days=1)
     return days
+
+
+def request_days(start, end, half=None):
+    """Quota a request consumes. A half-day (`half` set, always a single date)
+    costs 0.5 of a working weekday and nothing on a non-working day; otherwise
+    it's the weekday count of the range."""
+    if half:
+        return 0.5 if count_weekdays(start, end) == 1 else 0
+    return count_weekdays(start, end)

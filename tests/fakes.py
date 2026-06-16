@@ -41,7 +41,7 @@ def make_decline_view(private_metadata, reason=None):
     }
 
 
-def make_leave_view(leave_type, start, end, reason=None):
+def make_leave_view(leave_type, start, end, reason=None, half=None):
     """Build a view_submission state payload matching build_leave_modal."""
     return {
         "state": {
@@ -50,6 +50,7 @@ def make_leave_view(leave_type, start, end, reason=None):
                 "start_date": {"value": {"selected_date": start}},
                 "end_date": {"value": {"selected_date": end}},
                 "reason": {"value": {"value": reason}},
+                "half_day": {"value": {"selected_option": {"value": half or "full"}}},
             }
         }
     }

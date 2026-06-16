@@ -1,11 +1,11 @@
 """Request validation. Returns a {block_id: message} dict for inline modal
 errors; empty dict means valid."""
 
-from leave.balance import count_weekdays
+from leave.balance import request_days
 from leave.requests import has_overlap, remaining_balance
 
 
-def validate_request(db, employee, leave_type, start, end, today):
+def validate_request(db, employee, leave_type, start, end, today, half=None):
     errors = {}
 
     if end < start:
@@ -13,10 +13,14 @@ def validate_request(db, employee, leave_type, start, end, today):
         errors["end_date"] = "End date can't be before the start date."
         return errors
 
+    if half and start != end:
+        errors["end_date"] = "A half day must be a single date — leave the end date empty."
+        return errors
+
     if start < today:
         errors["start_date"] = "Start date can't be in the past."
 
-    requested = count_weekdays(start, end)
+    requested = request_days(start, end, half)
     remaining = remaining_balance(db, employee, leave_type, today)
     if requested > remaining:
         errors["leave_type"] = (
