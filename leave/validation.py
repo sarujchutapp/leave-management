@@ -3,7 +3,8 @@ errors; empty dict means valid."""
 
 from leave.balance import request_days
 from leave.holidays import holidays_between
-from leave.requests import has_overlap, remaining_balance
+from leave.policy import get_policy
+from leave.requests import continuous_absence_length, has_overlap, remaining_balance
 
 
 def validate_request(db, employee, leave_type, start, end, today, half=None):
@@ -30,5 +31,15 @@ def validate_request(db, employee, leave_type, start, end, today, half=None):
 
     if has_overlap(db, employee["slack_user_id"], start, end):
         errors["end_date"] = "This overlaps one of your existing requests."
+
+    # Consecutive-absence cap: only full-day vacation requests can create a long run
+    # (a half-day is a 'present' day, so it bounds rather than fills).
+    if leave_type == "vacation" and not half and "start_date" not in errors:
+        cap = get_policy(db)["consecutive_limit"]["vacation"]
+        run = continuous_absence_length(db, employee["slack_user_id"], start, end)
+        if run > cap:
+            errors["start_date"] = (
+                f"This would be {run} consecutive days away; the limit is {cap}."
+            )
 
     return errors

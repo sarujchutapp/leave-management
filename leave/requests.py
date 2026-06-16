@@ -9,12 +9,12 @@ date strings escape this module — callers receive `int` and `date`.
 """
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
-from leave.holidays import holidays_for_year
+from leave.holidays import holidays_between, holidays_for_year
 from leave.policy import allowance_for, get_policy
 
 
@@ -178,6 +178,40 @@ def remaining_balances(db, employee, today):
             available = base
         result[t] = available - used.get(t, 0)
     return result
+
+
+def active_full_leave_ranges(db, employee_id):
+    """(start, end) for the employee's pending/approved FULL-day leave. Half-days
+    are 'present' days, so they bound a continuous absence rather than fill it."""
+    return [
+        (date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]))
+        for r in _by_employee(db, employee_id)
+        if r["status"] in ("pending", "approved") and not r.get("half")
+    ]
+
+
+def continuous_absence_length(db, employee_id, start, end):
+    """Calendar-day length of the unbroken non-working run a [start,end] full-day
+    leave would join. Weekends, holidays, and the employee's existing full-day
+    leave fill the run; a worked day (a weekday that is neither holiday nor full-day
+    leave) bounds it. The window for holidays/extension comfortably exceeds any cap."""
+    ranges = active_full_leave_ranges(db, employee_id)
+    holidays = holidays_between(db, start - timedelta(days=60), end + timedelta(days=60))
+
+    def non_working(d):
+        if d.weekday() >= 5 or d in holidays or start <= d <= end:
+            return True
+        return any(s <= d <= e for s, e in ranges)
+
+    run_start, run_end, guard = start, end, 0
+    while guard < 400 and non_working(run_start - timedelta(days=1)):
+        run_start -= timedelta(days=1)
+        guard += 1
+    guard = 0
+    while guard < 400 and non_working(run_end + timedelta(days=1)):
+        run_end += timedelta(days=1)
+        guard += 1
+    return (run_end - run_start).days + 1
 
 
 def has_overlap(db, employee_id, start, end):
