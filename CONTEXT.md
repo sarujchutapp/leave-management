@@ -17,7 +17,9 @@ _Avoid_: half-day leave, 0.5-day
 A company-wide non-working date that does not consume leave quota. A single shared set
 (no per-country/per-region variation), self-maintained — including company-internal
 closures no public calendar lists. Each holiday is a date plus a label. A weekday that
-is a holiday is skipped when counting the days a request consumes.
+is a holiday is skipped when counting the days a request consumes. Source of truth is the
+`holidays` store, ingested from an operator-maintained CSV; the same source is mirrored
+onto the Team Leave calendar as all-day events (a display mirror, not the counting source).
 _Avoid_: public holiday, bank holiday, day off
 
 **Carry-over**:
