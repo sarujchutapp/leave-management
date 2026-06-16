@@ -63,32 +63,42 @@ def _parse_submission(view):
     end_raw = values.get("end_date", {}).get("value", {}).get("selected_date")
     end = _to_gregorian(date.fromisoformat(end_raw)) if end_raw else start
     reason = values["reason"]["value"].get("value")
-    return leave_type, start, end, reason
+    # Half-day selector defaults to "full"; "morning"/"afternoon" mark a half day.
+    half_opt = values.get("half_day", {}).get("value", {}).get("selected_option") or {}
+    half = half_opt.get("value")
+    if half == "full":
+        half = None
+    return leave_type, start, end, reason, half
 
 
-def _finalize_approval(db, calendar, request_id, employee, leave_type, start, end):
+def _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half=None):
     """Mark approved and create the shared-calendar event, storing its id."""
     approve_request(db, request_id)
-    event_id = calendar.create_event(f"{employee['real_name']} — {leave_type}", start, end)
+    summary = f"{employee['real_name']} — {leave_type}"
+    if half:
+        summary += f" ({half})"
+    event_id = calendar.create_event(summary, start, end)
     set_calendar_event_id(db, request_id, event_id)
 
 
 def submit_leave(ack, body, view, client, db, calendar, today=None):
     today = today or date.today()
     employee = get_employee(db, body["user"]["id"])
-    leave_type, start, end, reason = _parse_submission(view)
+    leave_type, start, end, reason, half = _parse_submission(view)
 
-    errors = validate_request(db, employee, leave_type, start, end, today)
+    errors = validate_request(db, employee, leave_type, start, end, today, half)
     if errors:
         ack(response_action="errors", errors=errors)
         return
 
-    request_id = create_request(db, employee["slack_user_id"], leave_type, start, end, reason)
+    request_id = create_request(
+        db, employee["slack_user_id"], leave_type, start, end, reason, half
+    )
     ack()
 
     # Top of chain: no manager to approve, so auto-approve.
     if employee["manager_id"] is None:
-        _finalize_approval(db, calendar, request_id, employee, leave_type, start, end)
+        _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half)
         _notify(
             client,
             employee["slack_user_id"],
@@ -154,6 +164,7 @@ def handle_approve(ack, body, client, db, calendar):
         request["leave_type"],
         request["start_date"],
         request["end_date"],
+        request.get("half"),
     )
     client.chat_update(
         channel=body["channel"]["id"],

@@ -54,6 +54,31 @@ def build_leave_modal(balances=None):
             },
             {
                 "type": "input",
+                "block_id": "half_day",
+                "label": {"type": "plain_text", "text": "Half day?"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Morning/afternoon applies to a single-day leave only.",
+                },
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "initial_option": {
+                        "text": {"type": "plain_text", "text": "Full day"},
+                        "value": "full",
+                    },
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Full day"}, "value": "full"},
+                        {"text": {"type": "plain_text", "text": "Morning"}, "value": "morning"},
+                        {
+                            "text": {"type": "plain_text", "text": "Afternoon"},
+                            "value": "afternoon",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "input",
                 "block_id": "reason",
                 "optional": True,
                 "label": {"type": "plain_text", "text": "Reason"},
