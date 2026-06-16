@@ -61,6 +61,27 @@ resource "aws_dynamodb_table" "requests" {
   }
 }
 
+# Company holidays. Partitioned by year (sort key holiday_date) so a year's
+# holidays come back from a single Query — no scan. Schema mirrors
+# leave/seed.py:create_tables. Operators write rows as themselves (the import
+# script); the Lambda only reads, so its IAM grants GetItem/Query only.
+resource "aws_dynamodb_table" "holidays" {
+  name         = var.holidays_table
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "year"
+  range_key    = "holiday_date"
+
+  attribute {
+    name = "year"
+    type = "S"
+  }
+
+  attribute {
+    name = "holiday_date"
+    type = "S"
+  }
+}
+
 # --- IAM (least privilege) -----------------------------------------------------
 data "aws_iam_policy_document" "assume_role" {
   statement {
@@ -103,6 +124,13 @@ data "aws_iam_policy_document" "lambda" {
       aws_dynamodb_table.requests.arn,
       "${aws_dynamodb_table.requests.arn}/index/${var.by_employee_index}",
     ]
+  }
+
+  # The Lambda only reads holidays (day-counting); operators write them out-of-band.
+  statement {
+    sid       = "HolidaysRead"
+    actions   = ["dynamodb:GetItem", "dynamodb:Query"]
+    resources = [aws_dynamodb_table.holidays.arn]
   }
 
   statement {
@@ -167,6 +195,7 @@ resource "aws_lambda_function" "leave_bot" {
     variables = {
       EMPLOYEES_TABLE              = var.employees_table
       REQUESTS_TABLE               = var.requests_table
+      HOLIDAYS_TABLE               = var.holidays_table
       TEAM_CALENDAR_ID             = var.team_calendar_id
       GOOGLE_SERVICE_ACCOUNT_FILE  = "/tmp/service-account.json"
       SLACK_BOT_TOKEN_PARAM        = local.ssm_bot_token_param

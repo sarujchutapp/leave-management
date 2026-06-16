@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
+from leave.holidays import holidays_for_year
 from leave.policy import allowance_for, get_policy
 
 
@@ -49,9 +50,13 @@ def approved_weekdays_this_year(db, employee_id, leave_type, today):
         KeyConditionExpression=Key("employee_id").eq(employee_id)
         & Key("start_date").between(year_start, year_end),
     )
+    holidays = holidays_for_year(db, today.year)
     return sum(
         request_days(
-            date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]), r.get("half")
+            date.fromisoformat(r["start_date"]),
+            date.fromisoformat(r["end_date"]),
+            r.get("half"),
+            holidays,
         )
         for r in resp["Items"]
         if r["status"] == "approved" and r["leave_type"] == leave_type
@@ -77,12 +82,16 @@ def approved_weekdays_by_type_this_year(db, employee_id, today):
         KeyConditionExpression=Key("employee_id").eq(employee_id)
         & Key("start_date").between(year_start, year_end),
     )
+    holidays = holidays_for_year(db, today.year)
     totals = {}
     for r in resp["Items"]:
         if r["status"] != "approved":
             continue
         days = request_days(
-            date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]), r.get("half")
+            date.fromisoformat(r["start_date"]),
+            date.fromisoformat(r["end_date"]),
+            r.get("half"),
+            holidays,
         )
         totals[r["leave_type"]] = totals.get(r["leave_type"], 0) + days
     return totals

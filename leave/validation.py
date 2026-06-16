@@ -2,6 +2,7 @@
 errors; empty dict means valid."""
 
 from leave.balance import request_days
+from leave.holidays import holidays_between
 from leave.requests import has_overlap, remaining_balance
 
 
@@ -20,7 +21,7 @@ def validate_request(db, employee, leave_type, start, end, today, half=None):
     if start < today:
         errors["start_date"] = "Start date can't be in the past."
 
-    requested = request_days(start, end, half)
+    requested = request_days(start, end, half, holidays_between(db, start, end))
     remaining = remaining_balance(db, employee, leave_type, today)
     if requested > remaining:
         errors["leave_type"] = (
