@@ -5,11 +5,15 @@ class FakeCalendar:
     def __init__(self):
         self.created = []
         self.deleted = []
+        self.updated = []
 
     def create_event(self, summary, start, end):
         event_id = f"evt{len(self.created) + 1}"
         self.created.append({"summary": summary, "start": start, "end": end, "id": event_id})
         return event_id
+
+    def update_event(self, event_id, summary):
+        self.updated.append({"id": event_id, "summary": summary})
 
     def delete_event(self, event_id):
         self.deleted.append(event_id)
