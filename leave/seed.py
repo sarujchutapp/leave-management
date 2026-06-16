@@ -10,8 +10,7 @@ import os
 import boto3
 
 from leave import db
-
-DEFAULT_ALLOWANCES = {"sick": 30, "vacation": 10, "personal": 5}
+from leave.policy import set_policy
 
 
 def create_tables():
@@ -56,14 +55,16 @@ def create_tables():
 
 
 def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=None):
-    db.employees.put_item(
-        Item={
-            "slack_user_id": slack_user_id,
-            "real_name": real_name,
-            "manager_id": manager_id,
-            "allowances": allowances or DEFAULT_ALLOWANCES,
-        }
-    )
+    item = {
+        "slack_user_id": slack_user_id,
+        "real_name": real_name,
+        "manager_id": manager_id,
+    }
+    # Allowances are a per-person override only; absent, balances read the central
+    # policy (see leave/policy.py). Don't write a default onto every employee.
+    if allowances is not None:
+        item["allowances"] = allowances
+    db.employees.put_item(Item=item)
 
 
 # Proxy employees for local testing. U_BOSS has no manager (top of chain).
@@ -79,9 +80,10 @@ def main():
     load_dotenv()
     create_tables()
     handle = db.connect()
+    set_policy(handle)  # establish the central leave policy (defaults; editable later)
     for slack_user_id, real_name, manager_id in PROXY_EMPLOYEES:
         upsert_employee(handle, slack_user_id, real_name, manager_id)
-    print(f"Seeded {len(PROXY_EMPLOYEES)} employees.")
+    print(f"Seeded {len(PROXY_EMPLOYEES)} employees + central policy.")
 
 
 if __name__ == "__main__":

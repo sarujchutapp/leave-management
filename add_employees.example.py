@@ -12,8 +12,8 @@ member IDs, then run (as yourself, not the deploy role):
 - member_id  = Slack profile -> ... (More) -> Copy member ID, from the workspace the bot serves.
 - manager_id = that person's approver's member ID, or None for whoever has no approver.
 - Re-running is safe: it overwrites by member_id, so this is also how you edit a name/manager.
-- Allowances default to sick 30 / vacation 10 / personal 5; pass a 4th item to override, e.g.
-  ("U123", "Name", "U_MGR", {"sick": 20, "vacation": 15, "personal": 5}).
+- Allowances come from the central leave policy (leave/policy.py); pass a 4th item only to
+  set a per-person override, e.g. ("U123", "Name", "U_MGR", {"sick": 20, "vacation": 15, "personal": 5}).
 """
 
 import os

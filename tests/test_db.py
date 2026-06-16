@@ -1,5 +1,5 @@
 from leave.db import get_employee
-from leave.seed import DEFAULT_ALLOWANCES, upsert_employee
+from leave.seed import upsert_employee
 
 
 def test_get_employee_returns_none_when_absent(db):
@@ -13,7 +13,8 @@ def test_get_employee_returns_row(db):
     emp = get_employee(db, "U_ALICE")
     assert emp["real_name"] == "Alice"
     assert emp["manager_id"] == "U_BOSS"
-    assert emp["allowances"] == DEFAULT_ALLOWANCES
+    # No per-person allowances by default — balances read the central policy.
+    assert "allowances" not in emp
 
 
 def test_null_manager_is_preserved(db):

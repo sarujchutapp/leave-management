@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
+from leave.policy import allowance_for, get_policy
 
 
 def _now_iso():
@@ -58,8 +59,9 @@ def approved_weekdays_this_year(db, employee_id, leave_type, today):
 
 
 def remaining_balance(db, employee, leave_type, today):
-    """Derived, never stored: allowance minus approved weekdays this year."""
-    allowance = int(employee["allowances"][leave_type])
+    """Derived, never stored: allowance minus approved weekdays this year. The base
+    allowance comes from the central policy (or the employee's override)."""
+    allowance = allowance_for(get_policy(db), employee, leave_type)
     used = approved_weekdays_this_year(db, employee["slack_user_id"], leave_type, today)
     return allowance - used
 
@@ -88,9 +90,13 @@ def approved_weekdays_by_type_this_year(db, employee_id, today):
 
 def remaining_balances(db, employee, today):
     """All leave types' remaining balance, derived from a single year query (vs
-    `remaining_balance` per type)."""
+    `remaining_balance` per type). Allowances come from the central policy, with the
+    employee's override applied per type where present."""
+    policy = get_policy(db)
     used = approved_weekdays_by_type_this_year(db, employee["slack_user_id"], today)
-    return {t: int(allowance) - used.get(t, 0) for t, allowance in employee["allowances"].items()}
+    return {
+        t: allowance_for(policy, employee, t) - used.get(t, 0) for t in policy["allowances"]
+    }
 
 
 def has_overlap(db, employee_id, start, end):
