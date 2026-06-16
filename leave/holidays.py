@@ -9,6 +9,12 @@ A `date` goes in / comes out; ISO strings stay inside this module.
 from datetime import date
 
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
+
+# When the holidays table isn't provisioned yet (no table, or the Lambda role lacks
+# the read grant), treat the company as having no holidays rather than erroring — so
+# the rest of the system runs. Reads auto-enable once the table + IAM exist.
+_NOT_PROVISIONED = {"ResourceNotFoundException", "AccessDeniedException"}
 
 
 def upsert_holiday(db, holiday_date, label, calendar_event_id=None):
@@ -25,8 +31,14 @@ def upsert_holiday(db, holiday_date, label, calendar_event_id=None):
 
 
 def holidays_for_year(db, year):
-    """The set of holiday `date`s in the given year, from one Query."""
-    resp = db.holidays.query(KeyConditionExpression=Key("year").eq(str(year)))
+    """The set of holiday `date`s in the given year, from one Query. Returns an
+    empty set if the holidays table isn't provisioned yet (see _NOT_PROVISIONED)."""
+    try:
+        resp = db.holidays.query(KeyConditionExpression=Key("year").eq(str(year)))
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _NOT_PROVISIONED:
+            return set()
+        raise
     return {date.fromisoformat(i["holiday_date"]) for i in resp["Items"]}
 
 
