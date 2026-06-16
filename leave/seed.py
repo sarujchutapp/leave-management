@@ -49,9 +49,24 @@ def create_tables():
             ],
         )
 
+    if db.HOLIDAYS_TABLE not in existing:
+        dynamodb.create_table(
+            TableName=db.HOLIDAYS_TABLE,
+            KeySchema=[
+                {"AttributeName": "year", "KeyType": "HASH"},
+                {"AttributeName": "holiday_date", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "year", "AttributeType": "S"},
+                {"AttributeName": "holiday_date", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
     waiter = dynamodb.meta.client.get_waiter("table_exists")
     waiter.wait(TableName=db.EMPLOYEES_TABLE)
     waiter.wait(TableName=db.REQUESTS_TABLE)
+    waiter.wait(TableName=db.HOLIDAYS_TABLE)
 
 
 def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=None):

@@ -6,17 +6,19 @@ import boto3
 
 EMPLOYEES_TABLE = os.environ.get("EMPLOYEES_TABLE", "leave_employees")
 REQUESTS_TABLE = os.environ.get("REQUESTS_TABLE", "leave_requests")
+HOLIDAYS_TABLE = os.environ.get("HOLIDAYS_TABLE", "leave_holidays")
 BY_EMPLOYEE_INDEX = "by_employee"
 
 
 class Db:
-    """Handle holding the two DynamoDB Table resources and the GSI name,
-    threaded everywhere the old SQL connection went. Doubles as a no-op
-    context manager so `with db.connect() as db:` reads the same as before."""
+    """Handle holding the DynamoDB Table resources and the GSI name, threaded
+    everywhere the old SQL connection went. Doubles as a no-op context manager
+    so `with db.connect() as db:` reads the same as before."""
 
-    def __init__(self, employees, requests, by_employee_index=BY_EMPLOYEE_INDEX):
+    def __init__(self, employees, requests, holidays, by_employee_index=BY_EMPLOYEE_INDEX):
         self.employees = employees
         self.requests = requests
+        self.holidays = holidays
         self.by_employee_index = by_employee_index
 
     def __enter__(self):
@@ -30,7 +32,11 @@ def connect():
     """A handle exposing the `employees`/`requests` Table resources and the
     `by_employee` GSI name. Credentials come from the standard boto3 chain."""
     dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION"))
-    return Db(dynamodb.Table(EMPLOYEES_TABLE), dynamodb.Table(REQUESTS_TABLE))
+    return Db(
+        dynamodb.Table(EMPLOYEES_TABLE),
+        dynamodb.Table(REQUESTS_TABLE),
+        dynamodb.Table(HOLIDAYS_TABLE),
+    )
 
 
 def get_employee(db, slack_user_id):

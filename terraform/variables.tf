@@ -32,6 +32,12 @@ variable "by_employee_index" {
   default     = "by_employee"
 }
 
+variable "holidays_table" {
+  type        = string
+  description = "DynamoDB holidays table name (partition year, sort holiday_date)."
+  default     = "leave_holidays"
+}
+
 variable "ssm_parameter_prefix" {
   type        = string
   description = "Path prefix for the three SSM SecureString parameters holding the secrets."
