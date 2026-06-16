@@ -82,7 +82,7 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     set_calendar_event_id(db, request_id, event_id)
 
 
-def submit_leave(ack, body, view, client, db, calendar, today=None):
+def submit_leave(ack, body, view, client, db, calendar, sheets=None, today=None):
     today = today or date.today()
     employee = get_employee(db, body["user"]["id"])
     leave_type, start, end, reason, half = _parse_submission(view)
@@ -109,9 +109,11 @@ def submit_leave(ack, body, view, client, db, calendar, today=None):
             db,
             client,
             today,
+            sheets,
             add={
                 "request_id": request_id,
                 "name": employee["real_name"],
+                "type": leave_type,
                 "start": start,
                 "end": end,
                 "half": half,
@@ -156,7 +158,7 @@ def _close_stale_ticket(client, channel, ts, request):
     )
 
 
-def handle_approve(ack, body, client, db, calendar, today=None):
+def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
     request_id = body["actions"][0]["value"]
@@ -201,9 +203,11 @@ def handle_approve(ack, body, client, db, calendar, today=None):
         db,
         client,
         today,
+        sheets,
         add={
             "request_id": request_id,
             "name": employee["real_name"],
+            "type": request["leave_type"],
             "start": request["start_date"],
             "end": request["end_date"],
             "half": request.get("half"),
@@ -276,7 +280,7 @@ def open_cancel_modal(ack, body, client, db, today=None):
     client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows))
 
 
-def submit_cancel(ack, body, view, client, db, calendar, today=None):
+def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
     request_id = view["state"]["values"]["request"]["value"]["selected_option"]["value"]
@@ -312,7 +316,7 @@ def submit_cancel(ack, body, view, client, db, calendar, today=None):
 
     if status_before == "approved" and request["calendar_event_id"]:
         calendar.delete_event(request["calendar_event_id"])
-        update_board(db, client, today, remove_request_id=request_id)
+        update_board(db, client, today, sheets, remove_request_id=request_id)
         if employee["manager_id"]:
             _notify(
                 client,
