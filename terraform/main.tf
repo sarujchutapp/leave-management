@@ -61,26 +61,13 @@ resource "aws_dynamodb_table" "requests" {
   }
 }
 
-# Company holidays. Partitioned by year (sort key holiday_date) so a year's
-# holidays come back from a single Query — no scan. Schema mirrors
-# leave/seed.py:create_tables. Operators write rows as themselves (the import
-# script); the Lambda only reads, so its IAM grants GetItem/Query only.
-resource "aws_dynamodb_table" "holidays" {
-  name         = var.holidays_table
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "year"
-  range_key    = "holiday_date"
-
-  attribute {
-    name = "year"
-    type = "S"
-  }
-
-  attribute {
-    name = "holiday_date"
-    type = "S"
-  }
-}
+# NOTE: the `holidays` table is deferred — creating it needs dynamodb:CreateTable on
+# leave_holidays, which the deploy role doesn't have (an admin must widen it, see
+# terraform/operator-policy.json). Until then the app degrades to "no holidays"
+# (leave/holidays.py catches the missing table/permission). To enable holidays later:
+# (1) admin adds the leave_holidays ARN to the deploy role's policy,
+# (2) restore this aws_dynamodb_table.holidays block + the HolidaysRead IAM statement,
+# (3) terraform apply, then run import_holidays.py.
 
 # --- IAM (least privilege) -----------------------------------------------------
 data "aws_iam_policy_document" "assume_role" {
@@ -128,12 +115,7 @@ data "aws_iam_policy_document" "lambda" {
     ]
   }
 
-  # The Lambda only reads holidays (day-counting); operators write them out-of-band.
-  statement {
-    sid       = "HolidaysRead"
-    actions   = ["dynamodb:GetItem", "dynamodb:Query"]
-    resources = [aws_dynamodb_table.holidays.arn]
-  }
+  # HolidaysRead is deferred with the holidays table (see note above the IAM section).
 
   statement {
     sid       = "ReadSecrets"
