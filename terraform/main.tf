@@ -181,6 +181,7 @@ resource "aws_lambda_function" "leave_bot" {
       REQUESTS_TABLE               = var.requests_table
       HOLIDAYS_TABLE               = var.holidays_table
       LEAVE_BOARD_CHANNEL          = var.leave_board_channel
+      LEAVE_SHEET_ID               = var.leave_sheet_id
       TEAM_CALENDAR_ID             = var.team_calendar_id
       GOOGLE_SERVICE_ACCOUNT_FILE  = "/tmp/service-account.json"
       SLACK_BOT_TOKEN_PARAM        = local.ssm_bot_token_param

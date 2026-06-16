@@ -40,7 +40,13 @@ variable "holidays_table" {
 
 variable "leave_board_channel" {
   type        = string
-  description = "Slack channel ID for the shared leave board. Empty disables the board (invite the bot to this channel)."
+  description = "Slack channel ID for the leave-board update messages. Empty disables the board (invite the bot to this channel)."
+  default     = ""
+}
+
+variable "leave_sheet_id" {
+  type        = string
+  description = "Google Sheet ID for the leave board grid. Empty disables the board (share the sheet with the service account)."
   default     = ""
 }
 

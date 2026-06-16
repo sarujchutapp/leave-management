@@ -19,6 +19,14 @@ class FakeCalendar:
         self.deleted.append(event_id)
 
 
+class FakeSheets:
+    def __init__(self):
+        self.renders = []
+
+    def render_grid(self, title, num_days, rows):
+        self.renders.append({"title": title, "num_days": num_days, "rows": rows})
+
+
 def make_action_body(value, user_id, channel="C1", ts="111.1", trigger_id="T"):
     """A block_actions payload (Approve/Decline button click)."""
     return {

@@ -82,20 +82,35 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     set_calendar_event_id(db, request_id, event_id)
 
 
-def submit_leave(ack, body, view, client, db, calendar, today=None):
+def submit_leave_ack(ack, body, view, db, today=None):
+    """Ack phase (must finish within Slack's 3s): validate and either return inline
+    errors or a bare ack. Returns True when the submission is valid. The heavy work
+    (calendar, board, manager DM) is done separately in submit_leave_apply so it can
+    run post-ack — synchronously in Socket Mode, as a lazy listener on Lambda."""
     today = today or date.today()
     employee = get_employee(db, body["user"]["id"])
     leave_type, start, end, reason, half = _parse_submission(view)
-
     errors = validate_request(db, employee, leave_type, start, end, today, half)
     if errors:
         ack(response_action="errors", errors=errors)
+        return False
+    ack()
+    return True
+
+
+def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None):
+    """Post-ack work: persist the request, then auto-approve (calendar + board) or DM
+    the manager. Re-validates because Lambda lazy listeners fire regardless of the ack
+    result; a now-invalid submission is simply dropped (the user already saw the error)."""
+    today = today or date.today()
+    employee = get_employee(db, body["user"]["id"])
+    leave_type, start, end, reason, half = _parse_submission(view)
+    if validate_request(db, employee, leave_type, start, end, today, half):
         return
 
     request_id = create_request(
         db, employee["slack_user_id"], leave_type, start, end, reason, half
     )
-    ack()
 
     # Top of chain: no manager to approve, so auto-approve.
     if employee["manager_id"] is None:
@@ -109,9 +124,11 @@ def submit_leave(ack, body, view, client, db, calendar, today=None):
             db,
             client,
             today,
+            sheets,
             add={
                 "request_id": request_id,
                 "name": employee["real_name"],
+                "type": leave_type,
                 "start": start,
                 "end": end,
                 "half": half,
@@ -130,6 +147,12 @@ def submit_leave(ack, body, view, client, db, calendar, today=None):
     )
     # Remember the ticket message so it can be withdrawn if the employee cancels.
     set_ticket_ref(db, request_id, resp["channel"], resp["ts"])
+
+
+def submit_leave(ack, body, view, client, db, calendar, sheets=None, today=None):
+    """Synchronous submit (Socket Mode / tests): ack-with-validation, then apply."""
+    if submit_leave_ack(ack, body, view, db, today):
+        submit_leave_apply(body, view, client, db, calendar, sheets, today)
 
 
 def _notify(client, employee_id, text):
@@ -156,7 +179,7 @@ def _close_stale_ticket(client, channel, ts, request):
     )
 
 
-def handle_approve(ack, body, client, db, calendar, today=None):
+def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
     request_id = body["actions"][0]["value"]
@@ -201,9 +224,11 @@ def handle_approve(ack, body, client, db, calendar, today=None):
         db,
         client,
         today,
+        sheets,
         add={
             "request_id": request_id,
             "name": employee["real_name"],
+            "type": request["leave_type"],
             "start": request["start_date"],
             "end": request["end_date"],
             "half": request.get("half"),
@@ -276,7 +301,7 @@ def open_cancel_modal(ack, body, client, db, today=None):
     client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows))
 
 
-def submit_cancel(ack, body, view, client, db, calendar, today=None):
+def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
     request_id = view["state"]["values"]["request"]["value"]["selected_option"]["value"]
@@ -312,7 +337,7 @@ def submit_cancel(ack, body, view, client, db, calendar, today=None):
 
     if status_before == "approved" and request["calendar_event_id"]:
         calendar.delete_event(request["calendar_event_id"])
-        update_board(db, client, today, remove_request_id=request_id)
+        update_board(db, client, today, sheets, remove_request_id=request_id)
         if employee["manager_id"]:
             _notify(
                 client,

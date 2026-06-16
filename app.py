@@ -15,6 +15,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from leave import db
 from leave.calendar_client import CalendarClient
+from leave.sheets_client import SheetsClient
 from leave.blocks import (
     APPROVE_ACTION,
     CANCEL_CALLBACK_ID,
@@ -30,6 +31,8 @@ from leave.handlers import (
     open_leave_modal,
     submit_cancel,
     submit_leave,
+    submit_leave_ack,
+    submit_leave_apply,
 )
 
 load_dotenv()
@@ -67,6 +70,16 @@ def build_app(calendar=None, faas=False):
             _calendar = CalendarClient.from_env()
         return _calendar
 
+    # Built lazily and only when the leave board is configured (LEAVE_SHEET_ID set),
+    # so cold-start paths that never render the board skip the heavy Sheets import.
+    _sheets = None
+
+    def get_sheets():
+        nonlocal _sheets
+        if _sheets is None and os.environ.get("LEAVE_SHEET_ID"):
+            _sheets = SheetsClient.from_env()
+        return _sheets
+
     # These open modals (need the trigger_id within 3s) or return validation errors
     # in the ack itself, so they must run synchronously, not as lazy listeners.
     @app.command("/dayoff")
@@ -84,19 +97,26 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             handle_decline_click(ack, body, client, d)
 
-    @app.view(LEAVE_CALLBACK_ID)
-    def _submit(ack, body, view, client):
-        with db.connect() as d:
-            submit_leave(ack, body, view, client, d, get_calendar())
-
-    # Approve / decline-submit / cancel do the slow post-ack work (Google Calendar
-    # API calls, manager DMs). On Lambda they run as lazy listeners so the ack still
-    # returns within Slack's 3s window; in Socket Mode they run inline as before.
+    # Approve / decline-submit / cancel — and the /dayoff submit — do slow post-ack
+    # work (Google Calendar/Sheets API calls, manager DMs). On Lambda they run as lazy
+    # listeners so the ack still returns within Slack's 3s window; in Socket Mode they
+    # run inline. The submit's ack phase only validates (fast); building the Google
+    # clients and writing the calendar/board happen in the lazy phase.
     if faas:
+
+        def _submit_ack(ack, body, view):
+            with db.connect() as d:
+                submit_leave_ack(ack, body, view, d)
+
+        def _submit_lazy(body, view, client):
+            with db.connect() as d:
+                submit_leave_apply(body, view, client, d, get_calendar(), get_sheets())
+
+        app.view(LEAVE_CALLBACK_ID)(ack=_submit_ack, lazy=[_submit_lazy])
 
         def _approve_lazy(body, client):
             with db.connect() as d:
-                handle_approve(_noop_ack, body, client, d, get_calendar())
+                handle_approve(_noop_ack, body, client, d, get_calendar(), get_sheets())
 
         def _decline_submit_lazy(body, view, client):
             with db.connect() as d:
@@ -104,17 +124,22 @@ def build_app(calendar=None, faas=False):
 
         def _cancel_lazy(body, view, client):
             with db.connect() as d:
-                submit_cancel(_noop_ack, body, view, client, d, get_calendar())
+                submit_cancel(_noop_ack, body, view, client, d, get_calendar(), get_sheets())
 
         app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
         app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
     else:
 
+        @app.view(LEAVE_CALLBACK_ID)
+        def _submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_leave(ack, body, view, client, d, get_calendar(), get_sheets())
+
         @app.action(APPROVE_ACTION)
         def _approve(ack, body, client):
             with db.connect() as d:
-                handle_approve(ack, body, client, d, get_calendar())
+                handle_approve(ack, body, client, d, get_calendar(), get_sheets())
 
         @app.view(DECLINE_CALLBACK_ID)
         def _decline_submit(ack, body, view, client):
@@ -124,7 +149,7 @@ def build_app(calendar=None, faas=False):
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):
             with db.connect() as d:
-                submit_cancel(ack, body, view, client, d, get_calendar())
+                submit_cancel(ack, body, view, client, d, get_calendar(), get_sheets())
 
     return app
 
