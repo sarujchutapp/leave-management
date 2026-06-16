@@ -38,6 +38,12 @@ variable "holidays_table" {
   default     = "leave_holidays"
 }
 
+variable "leave_board_channel" {
+  type        = string
+  description = "Slack channel ID for the shared leave board. Empty disables the board (invite the bot to this channel)."
+  default     = ""
+}
+
 variable "ssm_parameter_prefix" {
   type        = string
   description = "Path prefix for the three SSM SecureString parameters holding the secrets."

@@ -14,6 +14,7 @@ from leave.blocks import (
     build_leave_modal,
     build_ticket,
 )
+from leave.board import update_board
 from leave.db import get_employee
 from leave.requests import (
     approve_request,
@@ -104,6 +105,18 @@ def submit_leave(ack, body, view, client, db, calendar, today=None):
             employee["slack_user_id"],
             f"Your {leave_type} leave {start} → {end} was auto-approved.",
         )
+        update_board(
+            db,
+            client,
+            today,
+            add={
+                "request_id": request_id,
+                "name": employee["real_name"],
+                "start": start,
+                "end": end,
+                "half": half,
+            },
+        )
         return
 
     remaining = remaining_balance(db, employee, leave_type, today)
@@ -143,8 +156,9 @@ def _close_stale_ticket(client, channel, ts, request):
     )
 
 
-def handle_approve(ack, body, client, db, calendar):
+def handle_approve(ack, body, client, db, calendar, today=None):
     ack()
+    today = today or date.today()
     request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
     employee = get_employee(db, request["employee_id"])
@@ -182,6 +196,18 @@ def handle_approve(ack, body, client, db, calendar):
         client,
         employee["slack_user_id"],
         f"Your {request['leave_type']} leave {request['start_date']} → {request['end_date']} was approved.",
+    )
+    update_board(
+        db,
+        client,
+        today,
+        add={
+            "request_id": request_id,
+            "name": employee["real_name"],
+            "start": request["start_date"],
+            "end": request["end_date"],
+            "half": request.get("half"),
+        },
     )
 
 
@@ -286,6 +312,7 @@ def submit_cancel(ack, body, view, client, db, calendar, today=None):
 
     if status_before == "approved" and request["calendar_event_id"]:
         calendar.delete_event(request["calendar_event_id"])
+        update_board(db, client, today, remove_request_id=request_id)
         if employee["manager_id"]:
             _notify(
                 client,
