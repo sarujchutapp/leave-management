@@ -63,12 +63,77 @@ def approved_weekdays_this_year(db, employee_id, leave_type, today):
     )
 
 
+def _persist_carry_in(db, employee, cmap):
+    """Write the employee's whole carry_in map and mirror it onto the in-memory
+    employee dict so later reads in the same request see it."""
+    db.employees.update_item(
+        Key={"slack_user_id": employee["slack_user_id"]},
+        UpdateExpression="SET carry_in = :c",
+        ExpressionAttributeValues={":c": cmap},
+    )
+    employee["carry_in"] = cmap
+
+
+def carry_in_for(db, employee, year, policy=None):
+    """Vacation days carried into `year` for this employee — the one persisted
+    balance figure. Computed lazily and rolled forward from the latest stored
+    year; an employee with no stored carry yet is treated as starting this year
+    (carry_in = 0), so a new hire never accrues carry for years they didn't work.
+    Deterministic, so recomputing never double-counts."""
+    cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
+    if str(year) in cmap:
+        return cmap[str(year)]
+
+    policy = policy or get_policy(db)
+    base = allowance_for(policy, employee, "vacation")
+    max_carry = policy["max_carry_over"]["vacation"]
+    max_total = policy["max_total"]["vacation"]
+
+    if not cmap:
+        cmap[str(year)] = 0  # first year ever seen — start of accrual
+    else:
+        last = max(int(y) for y in cmap)
+        ci = cmap[str(last)]
+        for y in range(last + 1, year + 1):
+            available = min(base + ci, max_total)
+            used = approved_weekdays_this_year(
+                db, employee["slack_user_id"], "vacation", date(y - 1, 1, 1)
+            )
+            ci = min(max(available - used, 0), max_carry)
+            cmap[str(y)] = ci
+        cmap.setdefault(str(year), 0)
+
+    _persist_carry_in(db, employee, cmap)
+    return cmap[str(year)]
+
+
+def recompute_carry_in(db, employee, year):
+    """Rebuild carry_in[year] (and any later stored years) from the stored chain
+    — the operator escape hatch after a closed prior year is edited."""
+    cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
+    cmap = {y: v for y, v in cmap.items() if int(y) < year}
+    _persist_carry_in(db, employee, cmap)
+    return carry_in_for(db, employee, year)
+
+
+def _vacation_available(base, carry_in, max_total):
+    """In-year vacation availability. `max_total` caps how much carry adds on top
+    of the base grant; it never reduces the base itself (so an override above
+    max_total keeps its full base)."""
+    return base + max(0, min(carry_in, max_total - base))
+
+
 def remaining_balance(db, employee, leave_type, today):
-    """Derived, never stored: allowance minus approved weekdays this year. The base
-    allowance comes from the central policy (or the employee's override)."""
-    allowance = allowance_for(get_policy(db), employee, leave_type)
+    """Derived: allowance minus approved weekdays this year. Vacation adds the
+    capped carry-in; sick/personal just reset to base each year."""
+    policy = get_policy(db)
+    base = allowance_for(policy, employee, leave_type)
     used = approved_weekdays_this_year(db, employee["slack_user_id"], leave_type, today)
-    return allowance - used
+    if leave_type == "vacation":
+        carry = carry_in_for(db, employee, today.year, policy)
+        available = _vacation_available(base, carry, policy["max_total"]["vacation"])
+        return available - used
+    return base - used
 
 
 def approved_weekdays_by_type_this_year(db, employee_id, today):
@@ -100,12 +165,19 @@ def approved_weekdays_by_type_this_year(db, employee_id, today):
 def remaining_balances(db, employee, today):
     """All leave types' remaining balance, derived from a single year query (vs
     `remaining_balance` per type). Allowances come from the central policy, with the
-    employee's override applied per type where present."""
+    employee's override applied per type where present. Vacation adds capped carry-in."""
     policy = get_policy(db)
     used = approved_weekdays_by_type_this_year(db, employee["slack_user_id"], today)
-    return {
-        t: allowance_for(policy, employee, t) - used.get(t, 0) for t in policy["allowances"]
-    }
+    result = {}
+    for t in policy["allowances"]:
+        base = allowance_for(policy, employee, t)
+        if t == "vacation":
+            carry = carry_in_for(db, employee, today.year, policy)
+            available = _vacation_available(base, carry, policy["max_total"]["vacation"])
+        else:
+            available = base
+        result[t] = available - used.get(t, 0)
+    return result
 
 
 def has_overlap(db, employee_id, start, end):
