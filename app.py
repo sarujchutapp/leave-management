@@ -31,6 +31,8 @@ from leave.handlers import (
     open_leave_modal,
     submit_cancel,
     submit_leave,
+    submit_leave_ack,
+    submit_leave_apply,
 )
 
 load_dotenv()
@@ -95,15 +97,22 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             handle_decline_click(ack, body, client, d)
 
-    @app.view(LEAVE_CALLBACK_ID)
-    def _submit(ack, body, view, client):
-        with db.connect() as d:
-            submit_leave(ack, body, view, client, d, get_calendar(), get_sheets())
-
-    # Approve / decline-submit / cancel do the slow post-ack work (Google Calendar
-    # API calls, manager DMs). On Lambda they run as lazy listeners so the ack still
-    # returns within Slack's 3s window; in Socket Mode they run inline as before.
+    # Approve / decline-submit / cancel — and the /dayoff submit — do slow post-ack
+    # work (Google Calendar/Sheets API calls, manager DMs). On Lambda they run as lazy
+    # listeners so the ack still returns within Slack's 3s window; in Socket Mode they
+    # run inline. The submit's ack phase only validates (fast); building the Google
+    # clients and writing the calendar/board happen in the lazy phase.
     if faas:
+
+        def _submit_ack(ack, body, view):
+            with db.connect() as d:
+                submit_leave_ack(ack, body, view, d)
+
+        def _submit_lazy(body, view, client):
+            with db.connect() as d:
+                submit_leave_apply(body, view, client, d, get_calendar(), get_sheets())
+
+        app.view(LEAVE_CALLBACK_ID)(ack=_submit_ack, lazy=[_submit_lazy])
 
         def _approve_lazy(body, client):
             with db.connect() as d:
@@ -121,6 +130,11 @@ def build_app(calendar=None, faas=False):
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
         app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
     else:
+
+        @app.view(LEAVE_CALLBACK_ID)
+        def _submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_leave(ack, body, view, client, d, get_calendar(), get_sheets())
 
         @app.action(APPROVE_ACTION)
         def _approve(ack, body, client):

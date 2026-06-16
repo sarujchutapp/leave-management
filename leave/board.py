@@ -9,9 +9,12 @@ change. Disabled (no-op) unless both LEAVE_BOARD_CHANNEL and a sheets client are
 present.
 """
 
+import logging
 import os
 from calendar import monthrange
 from datetime import date, timedelta
+
+logger = logging.getLogger(__name__)
 
 BOARD_KEY = "__board__"
 
@@ -71,29 +74,36 @@ def update_board(db, client, today, sheets, *, add=None, remove_request_id=None)
     if not channel or sheets is None:
         return
 
-    month = f"{today.year:04d}-{today.month:02d}"
-    board = get_board(db)
-    same_month = board is not None and board.get("month") == month
-    entries = dict(board.get("entries") or {}) if same_month else {}
+    # The board is best-effort: a Sheets/Slack hiccup must never break or slow the
+    # leave request itself, so swallow and log rather than propagate.
+    try:
+        month = f"{today.year:04d}-{today.month:02d}"
+        board = get_board(db)
+        same_month = board is not None and board.get("month") == month
+        entries = dict(board.get("entries") or {}) if same_month else {}
 
-    if add:
-        entries[add["request_id"]] = {
-            "name": add["name"],
-            "type": add["type"],
-            "half": add.get("half"),
-            "start": add["start"].isoformat(),
-            "end": add["end"].isoformat(),
-        }
-    if remove_request_id:
-        entries.pop(remove_request_id, None)
+        if add:
+            entries[add["request_id"]] = {
+                "name": add["name"],
+                "type": add["type"],
+                "half": add.get("half"),
+                "start": add["start"].isoformat(),
+                "end": add["end"].isoformat(),
+            }
+        if remove_request_id:
+            entries.pop(remove_request_id, None)
 
-    num_days = monthrange(today.year, today.month)[1]
-    sheets.render_grid(today.strftime("%B %Y"), num_days, grid_rows(entries, today.year, today.month))
+        num_days = monthrange(today.year, today.month)[1]
+        sheets.render_grid(
+            today.strftime("%B %Y"), num_days, grid_rows(entries, today.year, today.month)
+        )
 
-    text = _change_text(add, remove_request_id)
-    url = _sheet_url()
-    if url:
-        text += f"  📋 <{url}|Leave sheet>"
-    client.chat_postMessage(channel=channel, text=text)
+        text = _change_text(add, remove_request_id)
+        url = _sheet_url()
+        if url:
+            text += f"  📋 <{url}|Leave sheet>"
+        client.chat_postMessage(channel=channel, text=text)
 
-    _save_board(db, channel, month, entries)
+        _save_board(db, channel, month, entries)
+    except Exception:
+        logger.exception("leave board update failed")

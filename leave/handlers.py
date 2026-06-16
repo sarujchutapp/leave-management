@@ -82,20 +82,35 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     set_calendar_event_id(db, request_id, event_id)
 
 
-def submit_leave(ack, body, view, client, db, calendar, sheets=None, today=None):
+def submit_leave_ack(ack, body, view, db, today=None):
+    """Ack phase (must finish within Slack's 3s): validate and either return inline
+    errors or a bare ack. Returns True when the submission is valid. The heavy work
+    (calendar, board, manager DM) is done separately in submit_leave_apply so it can
+    run post-ack — synchronously in Socket Mode, as a lazy listener on Lambda."""
     today = today or date.today()
     employee = get_employee(db, body["user"]["id"])
     leave_type, start, end, reason, half = _parse_submission(view)
-
     errors = validate_request(db, employee, leave_type, start, end, today, half)
     if errors:
         ack(response_action="errors", errors=errors)
+        return False
+    ack()
+    return True
+
+
+def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None):
+    """Post-ack work: persist the request, then auto-approve (calendar + board) or DM
+    the manager. Re-validates because Lambda lazy listeners fire regardless of the ack
+    result; a now-invalid submission is simply dropped (the user already saw the error)."""
+    today = today or date.today()
+    employee = get_employee(db, body["user"]["id"])
+    leave_type, start, end, reason, half = _parse_submission(view)
+    if validate_request(db, employee, leave_type, start, end, today, half):
         return
 
     request_id = create_request(
         db, employee["slack_user_id"], leave_type, start, end, reason, half
     )
-    ack()
 
     # Top of chain: no manager to approve, so auto-approve.
     if employee["manager_id"] is None:
@@ -132,6 +147,12 @@ def submit_leave(ack, body, view, client, db, calendar, sheets=None, today=None)
     )
     # Remember the ticket message so it can be withdrawn if the employee cancels.
     set_ticket_ref(db, request_id, resp["channel"], resp["ts"])
+
+
+def submit_leave(ack, body, view, client, db, calendar, sheets=None, today=None):
+    """Synchronous submit (Socket Mode / tests): ack-with-validation, then apply."""
+    if submit_leave_ack(ack, body, view, db, today):
+        submit_leave_apply(body, view, client, db, calendar, sheets, today)
 
 
 def _notify(client, employee_id, text):

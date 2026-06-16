@@ -75,6 +75,22 @@ def test_board_disabled_without_channel(db, monkeypatch):
     assert get_board(db) is None
 
 
+class _RaisingSheets:
+    def render_grid(self, *args, **kwargs):
+        raise RuntimeError("sheets unavailable")
+
+
+def test_board_failure_is_swallowed(db, monkeypatch):
+    # A Sheets/board error must never propagate (it would break/slow the leave request).
+    monkeypatch.setenv("LEAVE_BOARD_CHANNEL", "C_BOARD")
+    monkeypatch.setenv("LEAVE_SHEET_ID", "SHEET123")
+    client = FakeSlackClient()
+    update_board(db, client, date(2026, 6, 15), _RaisingSheets(), add=_add("r1", "Alice", "vacation", date(2026, 6, 10), date(2026, 6, 11)))
+    # No exception; nothing posted or saved because the render failed first.
+    assert client.chat_postMessage_calls == []
+    assert get_board(db) is None
+
+
 def test_board_disabled_without_sheets_client(db, monkeypatch):
     monkeypatch.setenv("LEAVE_BOARD_CHANNEL", "C_BOARD")
     client = FakeSlackClient()
