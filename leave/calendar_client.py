@@ -39,5 +39,11 @@ class CalendarClient:
         created = self.service.events().insert(calendarId=self.calendar_id, body=body).execute()
         return created["id"]
 
+    def update_event(self, event_id, summary):
+        """Patch an existing event's summary (used when a holiday's label changes)."""
+        self.service.events().patch(
+            calendarId=self.calendar_id, eventId=event_id, body={"summary": summary}
+        ).execute()
+
     def delete_event(self, event_id):
         self.service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()

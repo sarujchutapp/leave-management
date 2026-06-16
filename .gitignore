@@ -13,6 +13,7 @@ venv/
 
 # Operator-local files — real employee ids, role-assume helper, generated policy
 add_employees.py
+holidays.csv
 arn.sh
 terraform/operator-policy.json
 image*.png

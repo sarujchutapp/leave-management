@@ -37,3 +37,43 @@ def holidays_between(db, start, end):
     for year in range(start.year, end.year + 1):
         out |= {d for d in holidays_for_year(db, year) if start <= d <= end}
     return out
+
+
+def get_holiday(db, holiday_date):
+    """The stored holiday item for a date, or None."""
+    return db.holidays.get_item(
+        Key={"year": str(holiday_date.year), "holiday_date": holiday_date.isoformat()}
+    ).get("Item")
+
+
+def _title(label):
+    return f"Holiday: {label}"
+
+
+def apply_holidays(db, calendar, rows):
+    """Upsert each (date, label) into the store and mirror it onto the team
+    calendar as an all-day event. Idempotent: an existing holiday's event is
+    updated in place (no duplicate). Add/update-only — dates absent from `rows`
+    are left untouched."""
+    for holiday_date, label in rows:
+        existing = get_holiday(db, holiday_date)
+        event_id = existing.get("calendar_event_id") if existing else None
+        if event_id:
+            calendar.update_event(event_id, _title(label))
+        else:
+            event_id = calendar.create_event(_title(label), holiday_date, holiday_date)
+        upsert_holiday(db, holiday_date, label, event_id)
+
+
+def parse_holiday_rows(raw_rows):
+    """Turn raw CSV rows (lists/tuples of strings) into (date, label) pairs.
+    Skips blank rows and a leading `date,label` header."""
+    rows = []
+    for raw in raw_rows:
+        if not raw or not raw[0].strip():
+            continue
+        first = raw[0].strip()
+        if first.lower() == "date":  # header
+            continue
+        rows.append((date.fromisoformat(first), raw[1].strip()))
+    return rows
