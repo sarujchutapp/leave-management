@@ -72,19 +72,19 @@ class SheetsClient:
                     values.append(_str_cell(_HALF_LABEL.get(cell.get("half"), ""), color))
             grid.append({"values": values})
 
+        # A fresh sheet is only 26 columns / 1000 rows; resize it to fit the grid first
+        # (writing past the grid bounds otherwise fails with "exceeds grid limits"). The
+        # full grid is rewritten each time, so this also clears removed people/old months.
+        cols = num_days + 1  # name column + one per day
         sheet_id = self._first_sheet_id()
         requests = [
-            {  # wipe a generous area so removed people / old months disappear
-                "repeatCell": {
-                    "range": {
+            {
+                "updateSheetProperties": {
+                    "properties": {
                         "sheetId": sheet_id,
-                        "startRowIndex": 0,
-                        "endRowIndex": 200,
-                        "startColumnIndex": 0,
-                        "endColumnIndex": 40,
+                        "gridProperties": {"rowCount": max(len(grid), 2), "columnCount": cols},
                     },
-                    "cell": _str_cell(""),
-                    "fields": "userEnteredValue,userEnteredFormat.backgroundColor",
+                    "fields": "gridProperties.rowCount,gridProperties.columnCount",
                 }
             },
             {
