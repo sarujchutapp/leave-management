@@ -1,6 +1,6 @@
 from datetime import date
 
-from leave.board import get_board, grid_rows, update_board
+from leave.board import get_board, grid_rows, reset_board, update_board
 from leave.db import get_employee
 from leave.handlers import handle_approve, submit_cancel
 from leave.requests import approve_request, create_request, set_calendar_event_id
@@ -73,6 +73,19 @@ def test_board_disabled_without_channel(db, monkeypatch):
     update_board(db, client, date(2026, 6, 15), sheets, add=_add("r1", "Alice", "vacation", date(2026, 6, 10), date(2026, 6, 11)))
     assert sheets.renders == [] and client.chat_postMessage_calls == []
     assert get_board(db) is None
+
+
+def test_reset_board_clears_state_and_blanks_sheet(db, monkeypatch):
+    monkeypatch.setenv("LEAVE_BOARD_CHANNEL", "C_BOARD")
+    monkeypatch.setenv("LEAVE_SHEET_ID", "SHEET123")
+    client, sheets = FakeSlackClient(), FakeSheets()
+    update_board(db, client, date(2026, 6, 15), sheets, add=_add("r1", "Alice", "vacation", date(2026, 6, 10), date(2026, 6, 11)))
+    assert get_board(db) is not None
+
+    reset_board(db, sheets, date(2026, 6, 15))
+
+    assert get_board(db) is None  # saved state dropped
+    assert sheets.renders[-1]["rows"] == []  # sheet blanked
 
 
 class _RaisingSheets:

@@ -67,6 +67,15 @@ def _change_text(add, remove_request_id):
     return "Leave board updated"
 
 
+def reset_board(db, sheets, today):
+    """Operator clean-slate: drop the saved board state and blank the sheet (used by
+    clear_requests). No-op on the sheet if no client is given."""
+    db.employees.delete_item(Key={"slack_user_id": BOARD_KEY})
+    if sheets is not None:
+        num_days = monthrange(today.year, today.month)[1]
+        sheets.render_grid(today.strftime("%B %Y"), num_days, [])
+
+
 def update_board(db, client, today, sheets, *, add=None, remove_request_id=None):
     """Apply one change to the board state, re-render the sheet, and post a link to
     Slack. No-op unless a channel and a sheets client are both configured."""
