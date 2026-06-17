@@ -36,7 +36,7 @@ from leave.sheets_client import SheetsClient
 # The deployed region (resources live in ap-southeast-1; the state bucket is elsewhere).
 REGION = "ap-southeast-1"
 REQUESTS_TABLE = "leave_requests"
-os.environ.setdefault("AWS_REGION", REGION)  # so db.connect() targets the right region
+os.environ["AWS_REGION"] = REGION  # force: all bot resources live here, regardless of .env
 
 
 def main():
