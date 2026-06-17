@@ -16,6 +16,7 @@ from leave.blocks import (
     format_period,
 )
 from leave.board import update_board
+from leave.calendar_client import color_id_for
 from leave.db import get_employee
 from leave.requests import (
     approve_request,
@@ -74,12 +75,14 @@ def _parse_submission(view):
 
 
 def _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half=None):
-    """Mark approved and create the shared-calendar event, storing its id."""
+    """Mark approved and create the shared-calendar event, storing its id. The event
+    is tinted with the employee's stable colour so the calendar is readable per person."""
     approve_request(db, request_id)
     summary = f"{employee['real_name']} — {leave_type}"
     if half:
         summary += f" ({half})"
-    event_id = calendar.create_event(summary, start, end)
+    color_id = color_id_for(employee["slack_user_id"])
+    event_id = calendar.create_event(summary, start, end, color_id)
     set_calendar_event_id(db, request_id, event_id)
 
 

@@ -3,10 +3,22 @@
 Injected into handlers so tests can substitute a fake.
 """
 
+import hashlib
 import os
 from datetime import timedelta
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+# Google Calendar's 11 named event colours ("1".."11"). Each person is mapped to one
+# so the shared calendar is readable at a glance (collisions possible beyond 11 people).
+CALENDAR_COLOR_IDS = [str(i) for i in range(1, 12)]
+
+
+def color_id_for(key):
+    """Stable Google Calendar colorId for an employee key (e.g. slack_user_id).
+    Uses a fixed hash so the colour is consistent across events and processes."""
+    h = int(hashlib.sha1(key.encode()).hexdigest(), 16)
+    return CALENDAR_COLOR_IDS[h % len(CALENDAR_COLOR_IDS)]
 
 
 class CalendarClient:
@@ -28,14 +40,17 @@ class CalendarClient:
         service = build("calendar", "v3", credentials=creds)
         return cls(service, os.environ["TEAM_CALENDAR_ID"])
 
-    def create_event(self, summary, start, end):
+    def create_event(self, summary, start, end, color_id=None):
         """All-day event over the inclusive range. Google's all-day end date is
-        exclusive, so add a day. Returns the created event id."""
+        exclusive, so add a day. `color_id` (a Google colorId) tints the event.
+        Returns the created event id."""
         body = {
             "summary": summary,
             "start": {"date": start.isoformat()},
             "end": {"date": (end + timedelta(days=1)).isoformat()},
         }
+        if color_id:
+            body["colorId"] = color_id
         created = self.service.events().insert(calendarId=self.calendar_id, body=body).execute()
         return created["id"]
 
