@@ -13,6 +13,7 @@ from leave.blocks import (
     build_decline_modal,
     build_leave_modal,
     build_ticket,
+    format_period,
 )
 from leave.board import update_board
 from leave.db import get_employee
@@ -118,7 +119,7 @@ def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None
         _notify(
             client,
             employee["slack_user_id"],
-            f"Your {leave_type} leave {start} → {end} was auto-approved.",
+            f"Your {leave_type} leave {format_period(start, end, half)} was auto-approved.",
         )
         update_board(
             db,
@@ -138,7 +139,7 @@ def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None
 
     remaining = remaining_balance(db, employee, leave_type, today)
     blocks = build_ticket(
-        request_id, employee["real_name"], leave_type, start, end, reason, remaining
+        request_id, employee["real_name"], leave_type, start, end, reason, remaining, half
     )
     resp = client.chat_postMessage(
         channel=employee["manager_id"],
@@ -213,12 +214,14 @@ def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
             request["start_date"],
             request["end_date"],
             "✅ Approved",
+            half=request.get("half"),
         ),
     )
     _notify(
         client,
         employee["slack_user_id"],
-        f"Your {request['leave_type']} leave {request['start_date']} → {request['end_date']} was approved.",
+        f"Your {request['leave_type']} leave "
+        f"{format_period(request['start_date'], request['end_date'], request.get('half'))} was approved.",
     )
     update_board(
         db,
@@ -279,9 +282,13 @@ def handle_decline_submit(ack, body, view, client, db):
             request["end_date"],
             "❌ Declined",
             reason,
+            half=request.get("half"),
         ),
     )
-    text = f"Your {request['leave_type']} leave {request['start_date']} → {request['end_date']} was declined."
+    text = (
+        f"Your {request['leave_type']} leave "
+        f"{format_period(request['start_date'], request['end_date'], request.get('half'))} was declined."
+    )
     if reason:
         text += f" Reason: {reason}"
     _notify(client, employee["slack_user_id"], text)
@@ -343,12 +350,12 @@ def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None
                 client,
                 employee["manager_id"],
                 f"FYI: {employee['real_name']} cancelled their {request['leave_type']} "
-                f"leave {request['start_date']} → {request['end_date']}.",
+                f"leave {format_period(request['start_date'], request['end_date'], request.get('half'))}.",
             )
 
     _notify(
         client,
         body["user"]["id"],
         f"Cancelled your {request['leave_type']} leave "
-        f"{request['start_date']} → {request['end_date']}.",
+        f"{format_period(request['start_date'], request['end_date'], request.get('half'))}.",
     )

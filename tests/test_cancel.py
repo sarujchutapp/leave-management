@@ -152,8 +152,25 @@ def test_cancel_modal_lists_pending_and_future_approved_only(db):
     assert ack.response is None
     view = client.views_open_calls[0]["view"]
     options = view["blocks"][0]["element"]["options"]
-    assert view["blocks"][0]["element"]["type"] == "radio_buttons"
+    assert view["blocks"][0]["element"]["type"] == "static_select"
     assert {o["value"] for o in options} == {str(pending), str(approved_future)}
+
+
+def test_cancel_modal_handles_more_than_ten_requests(db):
+    # A backlog of >10 cancellable requests must still render (radio_buttons caps at
+    # 10; static_select does not) so /dayoff-cancel doesn't fail to open.
+    _people(db)
+    for i in range(12):
+        create_request(db, "U_ALICE", "vacation", date(2026, 7, i + 1), date(2026, 7, i + 1), None)
+
+    client, ack = FakeSlackClient(), FakeAck()
+    open_cancel_modal(
+        ack=ack, body={"user_id": "U_ALICE", "trigger_id": "T"}, client=client, db=db, today=TODAY
+    )
+
+    element = client.views_open_calls[0]["view"]["blocks"][0]["element"]
+    assert element["type"] == "static_select"
+    assert len(element["options"]) == 12
 
 
 def test_cancel_modal_empty(db):
