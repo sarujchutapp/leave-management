@@ -68,6 +68,7 @@ def test_cancel_removes_entry(db, monkeypatch):
 
 
 def test_board_disabled_without_channel(db, monkeypatch):
+    monkeypatch.delenv("LEAVE_BOARD_CHANNEL", raising=False)  # hermetic vs a local .env
     monkeypatch.setenv("LEAVE_SHEET_ID", "SHEET123")
     client, sheets = FakeSlackClient(), FakeSheets()
     update_board(db, client, date(2026, 6, 15), sheets, add=_add("r1", "Alice", "vacation", date(2026, 6, 10), date(2026, 6, 11)))

@@ -82,3 +82,41 @@ def test_modal_has_half_day_selector():
     block = next(b for b in view["blocks"] if b.get("block_id") == "half_day")
     values = [o["value"] for o in block["element"]["options"]]
     assert values == ["full", "morning", "afternoon"]
+
+
+def test_half_day_shown_in_manager_ticket(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")
+    client = FakeSlackClient()
+    view = make_leave_view("vacation", "2026-06-10", None, half="morning")
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ALICE"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=FakeCalendar(),
+        today=date(2026, 6, 1),
+    )
+
+    ticket = client.chat_postMessage_calls[0]
+    assert "morning half" in str(ticket["blocks"])  # distinguished from a full day
+
+
+def test_half_day_shown_in_auto_approve_message(db):
+    upsert_employee(db, "U_SOLO", "Solo", None)  # no manager -> auto-approve notice
+    client = FakeSlackClient()
+    view = make_leave_view("vacation", "2026-06-10", None, half="afternoon")
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=FakeCalendar(),
+        today=date(2026, 6, 1),
+    )
+
+    assert "afternoon half" in client.chat_postMessage_calls[0]["text"]

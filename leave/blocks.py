@@ -9,6 +9,14 @@ DECLINE_CALLBACK_ID = "decline_submit"
 CANCEL_CALLBACK_ID = "cancel_submit"
 
 
+def format_period(start, end, half=None):
+    """Human-readable leave period. A half-day is a single date and shows which
+    half, so messages distinguish it from a full day."""
+    if half:
+        return f"{start} ({half} half)"
+    return f"{start} → {end}"
+
+
 def build_leave_modal(balances=None):
     """The /dayoff request modal. If balances ({type: days_left}) is given, a
     context line at the top shows the remaining balance per leave type."""
@@ -101,9 +109,9 @@ def build_leave_modal(balances=None):
     }
 
 
-def build_ticket(request_id, employee_name, leave_type, start, end, reason, remaining):
+def build_ticket(request_id, employee_name, leave_type, start, end, reason, remaining, half=None):
     """Manager's approval ticket: details + Approve/Decline buttons."""
-    detail = f"*{employee_name}* requests *{leave_type}* leave\n{start} → {end}"
+    detail = f"*{employee_name}* requests *{leave_type}* leave\n{format_period(start, end, half)}"
     context = f"Balance left for {leave_type}: {remaining}"
     if reason:
         context += f"\nReason: {reason}"
@@ -159,9 +167,9 @@ def build_decline_modal(private_metadata):
     }
 
 
-def build_decision_notice(employee_name, leave_type, start, end, decision, reason=None):
+def build_decision_notice(employee_name, leave_type, start, end, decision, reason=None, half=None):
     """Replaces the ticket's buttons once a decision is made."""
-    text = f"{decision}: *{employee_name}* — {leave_type} {start} → {end}"
+    text = f"{decision}: *{employee_name}* — {leave_type} {format_period(start, end, half)}"
     if reason:
         text += f"\nReason: {reason}"
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
@@ -174,7 +182,7 @@ def build_cancel_modal(rows):
         {
             "text": {
                 "type": "plain_text",
-                "text": f"{r['leave_type']} · {r['start_date']} → {r['end_date']} ({r['status']})"[:75],
+                "text": f"{r['leave_type']} · {format_period(r['start_date'], r['end_date'], r.get('half'))} ({r['status']})"[:75],
             },
             "value": str(r["request_id"]),
         }
