@@ -176,8 +176,9 @@ def build_decision_notice(employee_name, leave_type, start, end, decision, reaso
 
 
 def build_cancel_modal(rows):
-    """Modal showing the cancellable requests as radio options laid out directly
-    on the modal (no dropdown to expand)."""
+    """Modal listing the cancellable requests in a dropdown. Uses static_select
+    (max 100 options) rather than radio_buttons (capped at 10) so a long backlog
+    of upcoming/pending requests doesn't blow the limit and fail to open."""
     options = [
         {
             "text": {
@@ -199,7 +200,12 @@ def build_cancel_modal(rows):
                 "type": "input",
                 "block_id": "request",
                 "label": {"type": "plain_text", "text": "Which request?"},
-                "element": {"type": "radio_buttons", "action_id": "value", "options": options},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick a request"},
+                    "options": options,
+                },
             }
         ],
     }
