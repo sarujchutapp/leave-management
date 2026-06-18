@@ -2,6 +2,7 @@ from datetime import date
 
 from leave.blocks import (
     CARRY_OVER_CALLBACK_ID,
+    CLEAR_CALLBACK_ID,
     CONTROL_MENU_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
@@ -9,21 +10,33 @@ from leave.blocks import (
     SETTINGS_VIEW_CALLBACK_ID,
     VIEW_SETTINGS_ACTION,
 )
+from leave.board import BOARD_KEY, get_board
 from leave.db import get_employee
 from leave.handlers import (
     NOT_ADMIN,
     is_admin,
     open_carry_over,
+    open_clear,
     open_control_menu,
     open_leave_limits,
     open_view_settings,
     submit_carry_over,
+    submit_clear,
     submit_leave_limits,
 )
+from leave.holidays import holidays_for_year, upsert_holiday
 from leave.policy import POLICY_KEY, get_policy, set_policy
-from leave.requests import recompute_all_carry_in, remaining_balance, remaining_balances
+from leave.requests import (
+    approve_request,
+    create_request,
+    get_request,
+    recompute_all_carry_in,
+    remaining_balance,
+    remaining_balances,
+    set_calendar_event_id,
+)
 from leave.seed import upsert_employee
-from tests.fakes import FakeAck, FakeSlackClient
+from tests.fakes import FakeAck, FakeCalendar, FakeSheets, FakeSlackClient
 
 ADMINS = {"U_ADMIN"}
 TODAY = date(2026, 6, 8)
@@ -66,6 +79,18 @@ def _seed_carry_2027(db, uid):
     upsert_employee(db, uid, uid, None)
     remaining_balance(db, get_employee(db, uid), "vacation", date(2026, 6, 1))
     remaining_balance(db, get_employee(db, uid), "vacation", date(2027, 6, 1))
+
+
+def _clear_view(word):
+    """A view_submission state payload matching build_clear_modal."""
+    return {"state": {"values": {"confirm": {"value": {"value": word}}}}}
+
+
+def _seed_approved_with_event(db, emp_id, event_id):
+    rid = create_request(db, emp_id, "vacation", date(2026, 6, 8), date(2026, 6, 9), None)
+    approve_request(db, rid)
+    set_calendar_event_id(db, rid, event_id)
+    return rid
 
 
 def _menu_action_ids(view):
@@ -379,3 +404,102 @@ def test_carry_over_non_admin_submit_rejected(db):
     )
     assert ack.called
     assert get_policy(db)["max_carry_over"]["vacation"] == 5
+
+
+# --- Clear: typed-confirm wipe (#33) -----------------------------------------
+
+
+def test_clear_modal_opens_for_admin(db):
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_clear(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        admin_ids=ADMINS,
+    )
+    assert len(client.views_push_calls) == 1
+    view = client.views_push_calls[0]["view"]
+    assert view["callback_id"] == CLEAR_CALLBACK_ID
+    assert any(b.get("block_id") == "confirm" for b in view["blocks"])
+
+
+def test_clear_wrong_word_is_noop(db):
+    upsert_employee(db, "U_A", "A", None)
+    rid = _seed_approved_with_event(db, "U_A", "evt1")
+    cal, sheets, ack = FakeCalendar(), FakeSheets(), FakeAck()
+    submit_clear(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_clear_view("nope"),
+        db=db,
+        calendar=cal,
+        sheets=sheets,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "confirm" in ack.response["errors"]
+    assert get_request(db, rid) is not None
+    assert cal.deleted == []
+
+
+def test_clear_correct_word_wipes_and_preserves_the_rest(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "A", None)
+    upsert_holiday(db, date(2026, 1, 1), "New Year")
+    r1 = _seed_approved_with_event(db, "U_A", "evt1")
+    r2 = _seed_approved_with_event(db, "U_A", "evt2")
+    # A board item to prove it gets reset.
+    db.employees.update_item(
+        Key={"slack_user_id": BOARD_KEY},
+        UpdateExpression="SET entries = :e",
+        ExpressionAttributeValues={":e": {}},
+    )
+    cal, sheets, ack = FakeCalendar(), FakeSheets(), FakeAck()
+    submit_clear(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_clear_view("CLEAR"),
+        db=db,
+        calendar=cal,
+        sheets=sheets,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.called and ack.response is None
+    # Requests gone, their calendar events deleted, board reset.
+    assert get_request(db, r1) is None and get_request(db, r2) is None
+    assert set(cal.deleted) == {"evt1", "evt2"}
+    assert get_board(db) is None
+    # Employees, central policy, and holidays kept.
+    assert get_employee(db, "U_A") is not None
+    assert get_policy(db)["allowances"]["vacation"] == 10
+    assert date(2026, 1, 1) in holidays_for_year(db, 2026)
+
+
+def test_clear_non_admin_is_rejected(db):
+    upsert_employee(db, "U_A", "A", None)
+    rid = _seed_approved_with_event(db, "U_A", "evt1")
+    cal, sheets, ack = FakeCalendar(), FakeSheets(), FakeAck()
+    submit_clear(
+        ack=ack,
+        body={"user": {"id": "U_OTHER"}},
+        view=_clear_view("CLEAR"),
+        db=db,
+        calendar=cal,
+        sheets=sheets,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.called
+    assert get_request(db, rid) is not None
+    assert cal.deleted == []
+
+
+def test_clear_requests_script_delegates_to_shared_function():
+    import clear_requests
+    from leave.requests import clear_all_requests
+
+    # The script wipes via the same extracted function the handler uses.
+    assert clear_requests.clear_all_requests is clear_all_requests

@@ -8,8 +8,10 @@ import json
 from datetime import date
 
 from leave.blocks import (
+    CLEAR_CONFIRM_WORD,
     build_cancel_modal,
     build_carry_over_modal,
+    build_clear_modal,
     build_control_menu,
     build_decision_notice,
     build_decline_modal,
@@ -28,6 +30,7 @@ from leave.requests import (
     can_cancel,
     cancel_request,
     cancellable_requests,
+    clear_all_requests,
     create_request,
     decline_request,
     get_request,
@@ -196,6 +199,51 @@ def submit_carry_over(ack, body, view, db, admin_ids, today=None):
     """Synchronous submit (Socket Mode / tests): ack-with-validation, then recompute."""
     if submit_carry_over_ack(ack, body, view, db, admin_ids):
         submit_carry_over_apply(body, view, db, admin_ids, today)
+
+
+def open_clear(ack, body, client, admin_ids):
+    """Clear button: re-checks admin, then pushes the typed-confirm modal."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(trigger_id=body["trigger_id"], view=build_clear_modal())
+
+
+def _clear_confirmed(view):
+    raw = view["state"]["values"]["confirm"]["value"].get("value")
+    return (raw or "").strip() == CLEAR_CONFIRM_WORD
+
+
+def submit_clear_ack(ack, body, view, admin_ids):
+    """Ack phase (under 3s): re-check admin and the typed confirmation word. Returns
+    True only when an admin typed the word exactly, so the caller runs the wipe."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return False
+    if not _clear_confirmed(view):
+        ack(
+            response_action="errors",
+            errors={"confirm": f"Type {CLEAR_CONFIRM_WORD} exactly to confirm."},
+        )
+        return False
+    ack()
+    return True
+
+
+def submit_clear_apply(body, view, db, calendar, sheets, admin_ids, today=None):
+    """Post-ack work: the actual wipe. Re-checks admin + confirmation because Lambda
+    lazy listeners fire regardless of the ack result; an unconfirmed submission is
+    dropped (nothing deleted)."""
+    today = today or date.today()
+    if not is_admin(body["user"]["id"], admin_ids) or not _clear_confirmed(view):
+        return
+    clear_all_requests(db, calendar, sheets, today)
+
+
+def submit_clear(ack, body, view, db, calendar, sheets, admin_ids, today=None):
+    """Synchronous submit (Socket Mode / tests): ack-with-confirmation, then wipe."""
+    if submit_clear_ack(ack, body, view, admin_ids):
+        submit_clear_apply(body, view, db, calendar, sheets, admin_ids, today)
 
 
 def open_leave_modal(ack, body, client, db, today=None):

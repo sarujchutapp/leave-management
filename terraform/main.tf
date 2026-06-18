@@ -102,7 +102,8 @@ data "aws_iam_policy_document" "lambda" {
     resources = [aws_dynamodb_table.employees.arn]
   }
 
-  # No DeleteItem — cancelling a request is an UpdateItem, never a delete.
+  # Cancelling a request is an UpdateItem. Scan + DeleteItem are for the /control
+  # Clear wipe (#33), which scans every request and batch-deletes the rows.
   statement {
     sid = "RequestsReadWrite"
     actions = [
@@ -110,6 +111,8 @@ data "aws_iam_policy_document" "lambda" {
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
       "dynamodb:Query",
+      "dynamodb:Scan",
+      "dynamodb:DeleteItem",
     ]
     resources = [
       aws_dynamodb_table.requests.arn,

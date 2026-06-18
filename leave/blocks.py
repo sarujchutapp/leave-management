@@ -14,6 +14,9 @@ CONTROL_MENU_CALLBACK_ID = "control_menu"
 SETTINGS_VIEW_CALLBACK_ID = "control_settings_view"
 LEAVE_LIMITS_CALLBACK_ID = "control_leave_limits_submit"
 CARRY_OVER_CALLBACK_ID = "control_carry_over_submit"
+CLEAR_CALLBACK_ID = "control_clear_submit"
+# Typed exactly to confirm the destructive Clear wipe.
+CLEAR_CONFIRM_WORD = "CLEAR"
 VIEW_SETTINGS_ACTION = "control_view_settings"
 LEAVE_LIMITS_ACTION = "control_leave_limits"
 CARRY_OVER_ACTION = "control_carry_over"
@@ -323,6 +326,37 @@ def build_carry_over_modal(policy):
                 "Max total (vacation days)",
                 policy["max_total"]["vacation"],
             ),
+        ],
+    }
+
+
+def build_clear_modal():
+    """Destructive wipe, gated by a typed confirmation word. Submitting anything
+    but the exact word returns a validation error and wipes nothing."""
+    return {
+        "type": "modal",
+        "callback_id": CLEAR_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Clear All Leave"},
+        "submit": {"type": "plain_text", "text": "Clear"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "This deletes *all* leave requests, their calendar events, and "
+                        "resets the board. Employees, policy, and holidays are kept. "
+                        "This cannot be undone."
+                    ),
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "confirm",
+                "label": {"type": "plain_text", "text": f"Type {CLEAR_CONFIRM_WORD} to confirm"},
+                "element": {"type": "plain_text_input", "action_id": "value"},
+            },
         ],
     }
 
