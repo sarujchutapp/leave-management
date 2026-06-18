@@ -8,6 +8,7 @@ from leave.blocks import (
     CONTROL_MENU_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
+    MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
     SETTINGS_VIEW_CALLBACK_ID,
     VIEW_SETTINGS_ACTION,
@@ -22,10 +23,12 @@ from leave.handlers import (
     open_clear,
     open_control_menu,
     open_leave_limits,
+    open_manage_employees,
     open_view_settings,
     submit_carry_over,
     submit_clear,
     submit_leave_limits,
+    submit_manage_employees,
 )
 from leave.holidays import holidays_for_year, upsert_holiday
 from leave.report import build_report_csv
@@ -95,6 +98,22 @@ def _seed_approved_with_event(db, emp_id, event_id):
     approve_request(db, rid)
     set_calendar_event_id(db, rid, event_id)
     return rid
+
+
+def _manage_view(employee, action="save", name=None, manager=None, overrides=None):
+    """A view_submission state payload matching build_manage_employees_modal."""
+    overrides = overrides or {}
+    values = {
+        "employee": {"value": {"selected_user": employee}},
+        "action": {"value": {"selected_option": {"value": action}}},
+        "name": {"value": {"value": name}},
+        "manager": {"value": {"selected_user": manager}},
+    }
+    for t in ("sick", "vacation", "personal"):
+        values[f"override_{t}"] = {
+            "value": {"value": str(overrides[t]) if t in overrides else None}
+        }
+    return {"state": {"values": values}}
 
 
 def _menu_action_ids(view):
@@ -582,3 +601,114 @@ def test_report_non_admin_rejected(db):
     )
     assert ack.called
     assert client.files_upload_v2_calls == []
+
+
+# --- Manage employees (#35) --------------------------------------------------
+
+
+def test_manage_modal_opens_for_admin(db):
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        admin_ids=ADMINS,
+    )
+    view = client.views_push_calls[0]["view"]
+    assert view["callback_id"] == MANAGE_EMPLOYEES_CALLBACK_ID
+    assert any(b.get("block_id") == "employee" for b in view["blocks"])
+
+
+def test_manage_add_creates_employee_with_override(db):
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_NEW", name="Newbie", manager="U_BOSS", overrides={"vacation": 15}),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.called and ack.response is None
+    emp = get_employee(db, "U_NEW")
+    assert emp["real_name"] == "Newbie"
+    assert emp["manager_id"] == "U_BOSS"
+    assert emp["allowances"] == {"vacation": 15}
+
+
+def test_manage_edit_updates_name_and_manager(db):
+    upsert_employee(db, "U_E", "Old Name", "U_OLD")
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", name="New Name", manager="U_NEW_MGR"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    emp = get_employee(db, "U_E")
+    assert emp["real_name"] == "New Name"
+    assert emp["manager_id"] == "U_NEW_MGR"
+
+
+def test_manage_delete_non_manager_succeeds(db):
+    upsert_employee(db, "U_A", "Alice", None)
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_A", action="delete"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert get_employee(db, "U_A") is None
+
+
+def test_manage_delete_manager_blocked_naming_reports(db):
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_R", "Reportee", "U_M")
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_M", action="delete"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "Reportee" in ack.response["errors"]["employee"]
+    # Nothing deleted, no one re-parented.
+    assert get_employee(db, "U_M") is not None
+    assert get_employee(db, "U_R")["manager_id"] == "U_M"
+
+
+def test_manage_delete_after_reassigning_reports_succeeds(db):
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_R", "Reportee", "U_M")
+    # Re-assign the report to someone else via the edit flow.
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_R", name="Reportee", manager="U_OTHER"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_M", action="delete"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response is None
+    assert get_employee(db, "U_M") is None
+
+
+def test_manage_non_admin_submit_rejected(db):
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_OTHER"}},
+        view=_manage_view("U_NEW", name="X"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert get_employee(db, "U_NEW") is None

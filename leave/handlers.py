@@ -17,15 +17,17 @@ from leave.blocks import (
     build_decline_modal,
     build_leave_limits_modal,
     build_leave_modal,
+    build_manage_employees_modal,
     build_settings_view,
     build_ticket,
     format_period,
 )
 from leave.board import update_board
 from leave.calendar_client import color_id_for
-from leave.db import get_employee
+from leave.db import get_employee, list_reports
 from leave.policy import get_policy, set_policy
 from leave.report import build_report_csv
+from leave.seed import delete_employee, upsert_employee
 from leave.requests import (
     approve_request,
     can_cancel,
@@ -264,6 +266,75 @@ def handle_report(ack, body, client, db, admin_ids, today=None):
         filename="leave-report.csv",
         title="Leave usage report",
     )
+
+
+_OVERRIDE_TYPES = ("sick", "vacation", "personal")
+
+
+def open_manage_employees(ack, body, client, admin_ids):
+    """Manage employees button: re-checks admin, then pushes the add/edit/delete modal."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(trigger_id=body["trigger_id"], view=build_manage_employees_modal())
+
+
+def _value(values, block_id):
+    return values.get(block_id, {}).get("value", {})
+
+
+def _parse_overrides(values):
+    """(allowances-or-None, errors). Only the non-blank per-type fields are written,
+    so a partial override falls back to central policy for the rest."""
+    parsed, errors = {}, {}
+    for leave_type in _OVERRIDE_TYPES:
+        raw = _value(values, f"override_{leave_type}").get("value")
+        if raw is None or raw.strip() == "":
+            continue
+        n, err = _parse_int(raw)
+        if err:
+            errors[f"override_{leave_type}"] = err
+        else:
+            parsed[leave_type] = n
+    return (parsed or None), errors
+
+
+def submit_manage_employees(ack, body, view, db, admin_ids):
+    """Add/edit (upsert) or delete an employee. Delete is block-and-tell: if the
+    target still manages anyone, the submit is rejected naming those reports and
+    nothing is deleted — no automatic re-parenting."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return
+    values = view["state"]["values"]
+    target = _value(values, "employee").get("selected_user")
+    action = _value(values, "action").get("selected_option", {}).get("value")
+
+    if action == "delete":
+        reports = [r for r in list_reports(db, target) if r["slack_user_id"] != target]
+        if reports:
+            names = ", ".join(sorted(r.get("real_name", r["slack_user_id"]) for r in reports))
+            ack(
+                response_action="errors",
+                errors={
+                    "employee": f"Still the manager of {names}. Re-assign them first, then delete."
+                },
+            )
+            return
+        ack()
+        delete_employee(db, target)
+        return
+
+    name = (_value(values, "name").get("value") or "").strip()
+    overrides, errors = _parse_overrides(values)
+    if not name:
+        errors["name"] = "Name is required to add or edit."
+    if errors:
+        ack(response_action="errors", errors=errors)
+        return
+    ack()
+    manager = _value(values, "manager").get("selected_user")
+    upsert_employee(db, target, name, manager, allowances=overrides)
 
 
 def open_leave_modal(ack, body, client, db, today=None):

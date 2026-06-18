@@ -29,6 +29,7 @@ from leave.blocks import (
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_EMPLOYEES_ACTION,
+    MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
     VIEW_SETTINGS_ACTION,
 )
@@ -43,6 +44,7 @@ from leave.handlers import (
     open_control_menu,
     open_leave_limits,
     open_leave_modal,
+    open_manage_employees,
     open_view_settings,
     submit_cancel,
     submit_carry_over,
@@ -55,11 +57,8 @@ from leave.handlers import (
     submit_leave_ack,
     submit_leave_apply,
     submit_leave_limits,
+    submit_manage_employees,
 )
-
-# Buttons whose features aren't built yet: acked so Bolt doesn't log them as
-# unhandled. Their slices (#35) will replace these with real handlers.
-INERT_CONTROL_ACTIONS = (MANAGE_EMPLOYEES_ACTION,)
 
 load_dotenv()
 
@@ -160,8 +159,16 @@ def build_app(calendar=None, faas=False):
     def _clear(ack, body, client):
         open_clear(ack, body, client, admin_ids)
 
-    for action_id in INERT_CONTROL_ACTIONS:
-        app.action(action_id)(_ack)
+    @app.action(MANAGE_EMPLOYEES_ACTION)
+    def _manage_employees(ack, body, client):
+        open_manage_employees(ack, body, client, admin_ids)
+
+    # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
+    # fast, so it runs synchronously in both run modes.
+    @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
+    def _manage_employees_submit(ack, body, view):
+        with db.connect() as d:
+            submit_manage_employees(ack, body, view, d, admin_ids)
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):

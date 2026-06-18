@@ -17,6 +17,7 @@ CARRY_OVER_CALLBACK_ID = "control_carry_over_submit"
 CLEAR_CALLBACK_ID = "control_clear_submit"
 # Typed exactly to confirm the destructive Clear wipe.
 CLEAR_CONFIRM_WORD = "CLEAR"
+MANAGE_EMPLOYEES_CALLBACK_ID = "control_manage_employees_submit"
 VIEW_SETTINGS_ACTION = "control_view_settings"
 LEAVE_LIMITS_ACTION = "control_leave_limits"
 CARRY_OVER_ACTION = "control_carry_over"
@@ -326,6 +327,87 @@ def build_carry_over_modal(policy):
                 "Max total (vacation days)",
                 policy["max_total"]["vacation"],
             ),
+        ],
+    }
+
+
+def _optional_user_select(block_id, label, placeholder):
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": {
+            "type": "users_select",
+            "action_id": "value",
+            "placeholder": {"type": "plain_text", "text": placeholder},
+        },
+    }
+
+
+def _optional_text(block_id, label):
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": {"type": "plain_text_input", "action_id": "value"},
+    }
+
+
+def build_manage_employees_modal():
+    """Add/edit (reuses the fields below) or delete an employee. The employee and
+    manager are picked by Slack user-picker, so member IDs are supplied directly.
+    Delete is block-and-tell: a manager with reports is rejected until reassigned."""
+    return {
+        "type": "modal",
+        "callback_id": MANAGE_EMPLOYEES_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Manage Employees"},
+        "submit": {"type": "plain_text", "text": "Apply"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "employee",
+                "label": {"type": "plain_text", "text": "Employee"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "action",
+                "label": {"type": "plain_text", "text": "Action"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "initial_option": {
+                        "text": {"type": "plain_text", "text": "Add / edit"},
+                        "value": "save",
+                    },
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Add / edit"}, "value": "save"},
+                        {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
+                    ],
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Add / edit uses the fields below. Delete ignores them and is "
+                        "blocked while the person still manages anyone.",
+                    }
+                ],
+            },
+            _optional_text("name", "Name (add / edit)"),
+            _optional_user_select("manager", "Manager (add / edit)", "Pick a manager"),
+            _optional_text("override_sick", "Sick override (optional)"),
+            _optional_text("override_vacation", "Vacation override (optional)"),
+            _optional_text("override_personal", "Personal override (optional)"),
         ],
     }
 

@@ -82,6 +82,11 @@ def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=No
     db.employees.put_item(Item=item)
 
 
+def delete_employee(db, slack_user_id):
+    """Remove an employee row. Caller is responsible for the manager guard."""
+    db.employees.delete_item(Key={"slack_user_id": slack_user_id})
+
+
 # Proxy employees for local testing. U_BOSS has no manager (top of chain).
 PROXY_EMPLOYEES = [
     ("U_EXAMPLE_OWNER", "Owner", None),
