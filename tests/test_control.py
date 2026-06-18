@@ -650,6 +650,28 @@ def test_manage_edit_updates_name_and_manager(db):
     assert emp["manager_id"] == "U_NEW_MGR"
 
 
+def test_manage_edit_preserves_carry_in(db):
+    upsert_employee(db, "U_E", "Eve", None)
+    # Materialise a carry chain so the row carries stored carry_in (2027 -> 5).
+    remaining_balance(db, get_employee(db, "U_E"), "vacation", date(2026, 6, 1))
+    remaining_balance(db, get_employee(db, "U_E"), "vacation", date(2027, 6, 1))
+    before = get_employee(db, "U_E")["carry_in"]
+    assert before["2027"] == 5
+
+    # Editing name/manager must not clobber the stored carry_in.
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", name="Eve Renamed", manager="U_MGR"),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    emp = get_employee(db, "U_E")
+    assert emp["real_name"] == "Eve Renamed"
+    assert emp["manager_id"] == "U_MGR"
+    assert emp["carry_in"] == before
+
+
 def test_manage_delete_non_manager_succeeds(db):
     upsert_employee(db, "U_A", "Alice", None)
     submit_manage_employees(

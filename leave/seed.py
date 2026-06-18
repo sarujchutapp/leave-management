@@ -70,16 +70,24 @@ def create_tables():
 
 
 def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=None):
-    item = {
-        "slack_user_id": slack_user_id,
-        "real_name": real_name,
-        "manager_id": manager_id,
-    }
-    # Allowances are a per-person override only; absent, balances read the central
-    # policy (see leave/policy.py). Don't write a default onto every employee.
+    """Create or update an employee. A field-level update (not a put_item), so it
+    only writes the identity fields it owns and never clobbers other attributes on
+    the row — notably the vacation `carry_in` that leave/requests.py persists there.
+
+    Allowances are a per-person override only; absent, balances read the central
+    policy (see leave/policy.py). Pass `allowances` to set the override; omit it
+    (None) to leave any existing override unchanged — it is not written by default.
+    """
+    set_clauses = ["real_name = :n", "manager_id = :m"]
+    values = {":n": real_name, ":m": manager_id}
     if allowances is not None:
-        item["allowances"] = allowances
-    db.employees.put_item(Item=item)
+        set_clauses.append("allowances = :a")
+        values[":a"] = allowances
+    db.employees.update_item(
+        Key={"slack_user_id": slack_user_id},
+        UpdateExpression="SET " + ", ".join(set_clauses),
+        ExpressionAttributeValues=values,
+    )
 
 
 def delete_employee(db, slack_user_id):
