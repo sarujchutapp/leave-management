@@ -8,6 +8,14 @@ personal).
 Runs **scale-to-zero** on AWS Lambda (Slack HTTP mode) behind a Function URL, with
 DynamoDB for storage — roughly **$0/month** at low usage.
 
+**V2** adds: **half-days** (morning/afternoon), **vacation carry-over** with company-wide
+caps, a **maximum consecutive-absence** limit, a central **leave policy** (allowances +
+caps in one place), **per-person calendar colours**, and a shared **leave board** — a
+Google Sheet grid the bot keeps current, with Slack posting a link when it changes.
+Company **holidays** are modelled too (currently deferred in production — see Notes). The
+domain vocabulary lives in [`CONTEXT.md`](CONTEXT.md); the carry-over model is
+[ADR-0004](docs/adr/0004-carry-over-balance-model.md).
+
 ## How it works
 
 - **Slack** — slash commands (`/dayoff`, `/dayoff-cancel`) plus interactive modals and
@@ -17,12 +25,30 @@ DynamoDB for storage — roughly **$0/month** at low usage.
   **Socket Mode** instead.
 - **DynamoDB** (on-demand) stores employees and leave requests.
 - **Google Calendar** — an approved request creates an all-day event on a shared team
-  calendar; cancelling an approved request removes it.
+  calendar (tinted with the requester's stable colour); cancelling removes it.
+- **Leave board** — a Google Sheet rendered as a people × days grid coloured by leave
+  type, rebuilt on each approve/cancel; the bot posts an "updated 📋 link" message to a
+  dedicated Slack channel. Opt-in via `LEAVE_BOARD_CHANNEL` + `LEAVE_SHEET_ID`.
 
 Key decisions are recorded in [`docs/adr/`](docs/adr/):
 - **ADR-0001** — DynamoDB for persistence
 - **ADR-0002** — run on AWS Lambda in Slack HTTP mode
 - **ADR-0003** — provision with Terraform; secrets in SSM SecureString
+- **ADR-0004** — carry-over balance model (central policy + per-person stored carry-in)
+
+## Leave model (V2)
+
+- **Day counting** — weekdays only; **holidays** (a company-wide set) don't consume quota,
+  and a half-day costs `0.5`. Balances are derived live from raw requests, so a
+  newly-added holiday retroactively refunds overlapping leave.
+- **Central policy** — base allowance and the caps live in one place (a reserved item),
+  not per employee; an employee's own `allowances` map is an optional override.
+- **Carry-over** — unused **vacation** rolls into the next year, capped by `max carry over`
+  (what rolls out) and `max total` (in-year availability). Computed lazily and stored
+  per person (ADR-0004). Sick/personal reset each year.
+- **Consecutive limit** — a vacation request is rejected if it would create a continuous
+  absence longer than the cap (default 15 calendar days; weekends, holidays, and all leave
+  fill the run).
 
 ## Setup
 
@@ -49,14 +75,18 @@ The full step-by-step runbook is **[SETUP.md](SETUP.md)**. In short:
 |------|-----------|
 | `app.py` | Bolt app factory (`build_app`) shared by both run modes, plus the **Socket Mode** entrypoint for local dev (`python app.py`). |
 | `lambda_handler.py` | **Production** entrypoint — the AWS Lambda `handler` (Slack HTTP mode). Fetches secrets from SSM on cold start and writes the Google key to `/tmp`. |
-| `leave/handlers.py` | Slack handler logic (open / submit / approve / decline / cancel) as plain functions, so tests can pass fakes. |
-| `leave/blocks.py` | Block Kit builders for the modals, the manager approval ticket, and decision notices. |
-| `leave/validation.py` | Request validation — dates, overlap, and remaining balance. |
-| `leave/balance.py` | Weekday counting used for balances. |
-| `leave/requests.py` | Leave-request persistence (DynamoDB) and the derived-balance query. |
-| `leave/db.py` | DynamoDB connection handle + employee lookup. |
-| `leave/calendar_client.py` | Thin wrapper over the Google Calendar API. |
-| `leave/seed.py` | Provision the tables (used by tests and initial setup) and seed **proxy** employees. |
+| `leave/handlers.py` | Slack handler logic (open / submit / approve / decline / cancel) as plain functions, so tests can pass fakes. On Lambda the slow submit/approve/cancel work runs as lazy listeners (post-ack). |
+| `leave/blocks.py` | Block Kit builders for the modals (incl. the half-day selector), the manager approval ticket, and decision notices; `format_period` shows the half. |
+| `leave/validation.py` | Request validation — dates, overlap, remaining balance, half-day rules, and the consecutive-absence limit. |
+| `leave/balance.py` | Day counting: weekdays, holiday-aware, half-day (`0.5`). |
+| `leave/policy.py` | Central leave policy (base allowances + caps) as a reserved item; allowance resolution with per-employee override. |
+| `leave/requests.py` | Leave-request persistence (DynamoDB), derived balances, lazy vacation carry-in, and the consecutive-absence calc. |
+| `leave/holidays.py` | Holidays store + CSV apply + the holiday-set queries day-counting uses (degrades to "no holidays" if unprovisioned). |
+| `leave/board.py` | The shared leave board — denormalized state + renders the Google Sheet + posts the Slack link. |
+| `leave/db.py` | DynamoDB connection handle (employees / requests / holidays) + employee lookup. |
+| `leave/calendar_client.py` | Thin wrapper over the Google Calendar API; per-person event colours. |
+| `leave/sheets_client.py` | Thin wrapper over the Google Sheets API; renders the leave-board grid. |
+| `leave/seed.py` | Provision the tables (used by tests and initial setup), seed the central policy + **proxy** employees. |
 
 ### Infrastructure & docs
 | Path | What it is |
@@ -74,9 +104,11 @@ access — *not* the deploy role), with the venv active. They target `ap-southea
 | Script | What it does |
 |--------|-------------|
 | `python smoke_check.py` | Health check across Slack, Google Calendar, and DynamoDB. Expect `PASS`. |
-| `python -m leave.seed` | Provision the tables and seed the **proxy** test employees. |
-| `add_employees.py` | Seed / edit the **real** employees (member id + manager). Copy from `add_employees.example.py`. |
-| `clear_requests.py` | Reset: empty `leave_requests` **and** delete the calendar events those approvals created. Keeps employees. |
+| `python -m leave.seed` | Provision the tables and seed the central policy + **proxy** test employees. |
+| `add_employees.py` | Seed / edit the **real** employees (member id + manager; optional allowance override). Copy from `add_employees.example.py`. |
+| `import_holidays.py` | Apply a holidays CSV: upsert the `holidays` store + mirror all-day events onto the calendar. Copy/edit `holidays.example.csv`. |
+| `recompute_carry.py` | Rebuild a stored vacation `carry_in` for an employee/year after a closed year is edited. |
+| `clear_requests.py` | Reset: empty `leave_requests`, delete their calendar events, **and** reset the leave board (drop state + blank the sheet). Keeps employees + central policy. |
 | `clear_calendar.py` | Delete calendar events **not** tracked by any DynamoDB row (orphaned / old events); keeps the ones still linked to a request. |
 
 > The deploy role manages **infrastructure only** — it has no DynamoDB item permissions.
@@ -101,3 +133,12 @@ pytest
   (see ADR-0003).
 - **One workspace at a time:** the bot serves whichever Slack workspace the configured bot
   token belongs to. Pointing it at another workspace means updating the SSM token/secret.
+- **Holidays are deferred in production:** the `holidays` table isn't created yet (the
+  deploy role lacks `dynamodb:CreateTable` on it), so day-counting currently runs in a
+  graceful "no holidays" mode. To enable: an admin widens the deploy role for
+  `leave_holidays`, restore the table + `HolidaysRead` IAM blocks in `terraform/main.tf`
+  (a note there lists the 3 steps), `terraform apply`, then run `import_holidays.py`.
+- **Leave board setup:** enable the Google Sheets API on the project, create a sheet and
+  share it (Editor) with the service account, then set `LEAVE_SHEET_ID` and
+  `LEAVE_BOARD_CHANNEL` (and invite the bot to that channel). Empty values disable the
+  board.
