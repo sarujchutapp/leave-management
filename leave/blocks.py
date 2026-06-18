@@ -13,6 +13,7 @@ CANCEL_CALLBACK_ID = "cancel_submit"
 CONTROL_MENU_CALLBACK_ID = "control_menu"
 SETTINGS_VIEW_CALLBACK_ID = "control_settings_view"
 LEAVE_LIMITS_CALLBACK_ID = "control_leave_limits_submit"
+CARRY_OVER_CALLBACK_ID = "control_carry_over_submit"
 VIEW_SETTINGS_ACTION = "control_view_settings"
 LEAVE_LIMITS_ACTION = "control_leave_limits"
 CARRY_OVER_ACTION = "control_carry_over"
@@ -298,6 +299,29 @@ def build_leave_limits_modal(policy):
                 "consecutive_limit",
                 "Vacation consecutive limit (days)",
                 policy["consecutive_limit"]["vacation"],
+            ),
+        ],
+    }
+
+
+def build_carry_over_modal(policy):
+    """Edit the vacation carry-over caps, pre-filled from the current central policy."""
+    return {
+        "type": "modal",
+        "callback_id": CARRY_OVER_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Carry-over"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            _number_input(
+                "max_carry_over",
+                "Max carry over (vacation days)",
+                policy["max_carry_over"]["vacation"],
+            ),
+            _number_input(
+                "max_total",
+                "Max total (vacation days)",
+                policy["max_total"]["vacation"],
             ),
         ],
     }

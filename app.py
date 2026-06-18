@@ -20,6 +20,7 @@ from leave.blocks import (
     APPROVE_ACTION,
     CANCEL_CALLBACK_ID,
     CARRY_OVER_ACTION,
+    CARRY_OVER_CALLBACK_ID,
     CLEAR_ACTION,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
@@ -35,11 +36,15 @@ from leave.handlers import (
     handle_decline_click,
     handle_decline_submit,
     open_cancel_modal,
+    open_carry_over,
     open_control_menu,
     open_leave_limits,
     open_leave_modal,
     open_view_settings,
     submit_cancel,
+    submit_carry_over,
+    submit_carry_over_ack,
+    submit_carry_over_apply,
     submit_leave,
     submit_leave_ack,
     submit_leave_apply,
@@ -47,9 +52,8 @@ from leave.handlers import (
 )
 
 # Buttons whose features aren't built yet: acked so Bolt doesn't log them as
-# unhandled. Their slices (#32–#35) will replace these with real handlers.
+# unhandled. Their slices (#33–#35) will replace these with real handlers.
 INERT_CONTROL_ACTIONS = (
-    CARRY_OVER_ACTION,
     CLEAR_ACTION,
     REPORT_ACTION,
     MANAGE_EMPLOYEES_ACTION,
@@ -145,6 +149,11 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             submit_leave_limits(ack, body, view, d, admin_ids)
 
+    @app.action(CARRY_OVER_ACTION)
+    def _carry_over(ack, body, client):
+        with db.connect() as d:
+            open_carry_over(ack, body, client, d, admin_ids)
+
     for action_id in INERT_CONTROL_ACTIONS:
         app.action(action_id)(_ack)
 
@@ -185,12 +194,29 @@ def build_app(calendar=None, faas=False):
         app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
         app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
+
+        # Carry-over submit: write the caps in the ack phase, then recompute every
+        # employee's stored carry_in post-ack (a Scan) so the ack stays under 3s.
+        def _carry_over_ack(ack, body, view):
+            with db.connect() as d:
+                submit_carry_over_ack(ack, body, view, d, admin_ids)
+
+        def _carry_over_lazy(body, view):
+            with db.connect() as d:
+                submit_carry_over_apply(body, view, d, admin_ids)
+
+        app.view(CARRY_OVER_CALLBACK_ID)(ack=_carry_over_ack, lazy=[_carry_over_lazy])
     else:
 
         @app.view(LEAVE_CALLBACK_ID)
         def _submit(ack, body, view, client):
             with db.connect() as d:
                 submit_leave(ack, body, view, client, d, get_calendar(), get_sheets())
+
+        @app.view(CARRY_OVER_CALLBACK_ID)
+        def _carry_over_submit(ack, body, view):
+            with db.connect() as d:
+                submit_carry_over(ack, body, view, d, admin_ids)
 
         @app.action(APPROVE_ACTION)
         def _approve(ack, body, client):

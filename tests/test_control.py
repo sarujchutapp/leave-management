@@ -1,6 +1,7 @@
 from datetime import date
 
 from leave.blocks import (
+    CARRY_OVER_CALLBACK_ID,
     CONTROL_MENU_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
@@ -12,13 +13,15 @@ from leave.db import get_employee
 from leave.handlers import (
     NOT_ADMIN,
     is_admin,
+    open_carry_over,
     open_control_menu,
     open_leave_limits,
     open_view_settings,
+    submit_carry_over,
     submit_leave_limits,
 )
-from leave.policy import get_policy, set_policy
-from leave.requests import remaining_balances
+from leave.policy import POLICY_KEY, get_policy, set_policy
+from leave.requests import recompute_all_carry_in, remaining_balance, remaining_balances
 from leave.seed import upsert_employee
 from tests.fakes import FakeAck, FakeSlackClient
 
@@ -43,6 +46,26 @@ def _leave_limits_view(sick, vacation, personal, consecutive):
             }
         }
     }
+
+
+def _carry_over_view(max_carry_over, max_total):
+    """A view_submission state payload matching build_carry_over_modal."""
+    return {
+        "state": {
+            "values": {
+                "max_carry_over": {"value": {"value": str(max_carry_over)}},
+                "max_total": {"value": {"value": str(max_total)}},
+            }
+        }
+    }
+
+
+def _seed_carry_2027(db, uid):
+    """Materialise an employee whose stored carry_in[2027] is 5 (no usage: leftover
+    10 capped to max_carry_over 5), so a later cap change has something to lower."""
+    upsert_employee(db, uid, uid, None)
+    remaining_balance(db, get_employee(db, uid), "vacation", date(2026, 6, 1))
+    remaining_balance(db, get_employee(db, uid), "vacation", date(2027, 6, 1))
 
 
 def _menu_action_ids(view):
@@ -242,3 +265,117 @@ def test_leave_limits_non_admin_submit_rejected(db):
     )
     assert ack.called
     assert get_policy(db)["allowances"] == {"sick": 30, "vacation": 10, "personal": 5}
+
+
+# --- Carry-over modal + recompute-all (#32) ----------------------------------
+
+
+def test_carry_over_modal_prefilled_with_current_caps(db):
+    set_policy(db, max_carry_over={"vacation": 7}, max_total={"vacation": 18})
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert len(client.views_push_calls) == 1
+    view = client.views_push_calls[0]["view"]
+    assert view["callback_id"] == CARRY_OVER_CALLBACK_ID
+    assert _input_initial(view, "max_carry_over") == "7"
+    assert _input_initial(view, "max_total") == "18"
+
+
+def test_carry_over_submit_updates_policy_preserving_allowances(db):
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 12, "personal": 7},
+        max_carry_over={"vacation": 5},
+        max_total={"vacation": 15},
+        consecutive_limit={"vacation": 14},
+    )
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(8, 20),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.called and ack.response is None
+    p = get_policy(db)
+    assert p["max_carry_over"]["vacation"] == 8
+    assert p["max_total"]["vacation"] == 20
+    # The other policy sections are left intact (set_policy overwrites the item).
+    assert p["allowances"] == {"sick": 30, "vacation": 12, "personal": 7}
+    assert p["consecutive_limit"]["vacation"] == 14
+
+
+def test_carry_over_submit_recomputes_all_carry_in(db):
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 5},
+        max_total={"vacation": 15},
+    )
+    _seed_carry_2027(db, "U_A")
+    _seed_carry_2027(db, "U_B")
+    assert get_employee(db, "U_A")["carry_in"]["2027"] == 5
+    assert get_employee(db, "U_B")["carry_in"]["2027"] == 5
+
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(3, 15),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    # Lowering max carry over rebuilds every employee's stored 2027 carry_in: 5 -> 3.
+    assert get_policy(db)["max_carry_over"]["vacation"] == 3
+    assert get_employee(db, "U_A")["carry_in"]["2027"] == 3
+    assert get_employee(db, "U_B")["carry_in"]["2027"] == 3
+
+
+def test_recompute_all_carry_in_skips_policy_item(db):
+    set_policy(db)
+    _seed_carry_2027(db, "U_A")
+    recompute_all_carry_in(db, 2027)
+    # The reserved central-policy item must not be treated as an employee.
+    policy_item = db.employees.get_item(Key={"slack_user_id": POLICY_KEY}).get("Item")
+    assert "carry_in" not in policy_item
+    assert get_employee(db, "U_A")["carry_in"]["2027"] == 5
+
+
+def test_carry_over_invalid_input_writes_nothing(db):
+    set_policy(db, max_carry_over={"vacation": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view("x", -1),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.response["response_action"] == "errors"
+    assert set(ack.response["errors"]) == {"max_carry_over", "max_total"}
+    assert get_policy(db)["max_carry_over"]["vacation"] == 5
+
+
+def test_carry_over_non_admin_submit_rejected(db):
+    set_policy(db, max_carry_over={"vacation": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_OTHER"}},
+        view=_carry_over_view(1, 1),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.called
+    assert get_policy(db)["max_carry_over"]["vacation"] == 5

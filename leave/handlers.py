@@ -9,6 +9,7 @@ from datetime import date
 
 from leave.blocks import (
     build_cancel_modal,
+    build_carry_over_modal,
     build_control_menu,
     build_decision_notice,
     build_decline_modal,
@@ -30,6 +31,7 @@ from leave.requests import (
     create_request,
     decline_request,
     get_request,
+    recompute_all_carry_in,
     remaining_balance,
     remaining_balances,
     set_calendar_event_id,
@@ -127,6 +129,73 @@ def submit_leave_limits(ack, body, view, db, admin_ids):
         max_total=policy["max_total"],
         consecutive_limit={"vacation": parsed["consecutive_limit"]},
     )
+
+
+# Block_ids of the carry-over modal (also the keys of the parsed values).
+_CARRY_FIELDS = ("max_carry_over", "max_total")
+
+
+def open_carry_over(ack, body, client, db, admin_ids):
+    """Carry-over button: re-checks admin, then pushes the modal pre-filled with the
+    current vacation carry-over caps."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(trigger_id=body["trigger_id"], view=build_carry_over_modal(get_policy(db)))
+
+
+def _parse_carry_over(view):
+    """(parsed, errors) for the carry-over modal — non-negative whole numbers."""
+    values = view["state"]["values"]
+    parsed, errors = {}, {}
+    for field in _CARRY_FIELDS:
+        n, err = _parse_int(values[field]["value"]["value"])
+        if err:
+            errors[field] = err
+        else:
+            parsed[field] = n
+    return parsed, errors
+
+
+def submit_carry_over_ack(ack, body, view, db, admin_ids):
+    """Ack phase (under 3s): re-check admin, validate, write the new caps. Returns
+    True when applied, so the caller knows to run the post-ack recompute."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return False
+    parsed, errors = _parse_carry_over(view)
+    if errors:
+        ack(response_action="errors", errors=errors)
+        return False
+    ack()
+    policy = get_policy(db)
+    set_policy(
+        db,
+        allowances=policy["allowances"],
+        max_carry_over={"vacation": parsed["max_carry_over"]},
+        max_total={"vacation": parsed["max_total"]},
+        consecutive_limit=policy["consecutive_limit"],
+    )
+    return True
+
+
+def submit_carry_over_apply(body, view, db, admin_ids, today=None):
+    """Post-ack work: rebuild every employee's stored carry_in under the new caps.
+    Re-checks admin + validity because Lambda lazy listeners fire regardless of the
+    ack result; an invalid/non-admin submission is dropped (no recompute)."""
+    today = today or date.today()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    _, errors = _parse_carry_over(view)
+    if errors:
+        return
+    recompute_all_carry_in(db, today.year)
+
+
+def submit_carry_over(ack, body, view, db, admin_ids, today=None):
+    """Synchronous submit (Socket Mode / tests): ack-with-validation, then recompute."""
+    if submit_carry_over_ack(ack, body, view, db, admin_ids):
+        submit_carry_over_apply(body, view, db, admin_ids, today)
 
 
 def open_leave_modal(ack, body, client, db, today=None):

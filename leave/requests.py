@@ -15,7 +15,7 @@ from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
 from leave.holidays import holidays_between, holidays_for_year
-from leave.policy import allowance_for, get_policy
+from leave.policy import POLICY_KEY, allowance_for, get_policy
 
 
 def _now_iso():
@@ -114,6 +114,23 @@ def recompute_carry_in(db, employee, year):
     cmap = {y: v for y, v in cmap.items() if int(y) < year}
     _persist_carry_in(db, employee, cmap)
     return carry_in_for(db, employee, year)
+
+
+def recompute_all_carry_in(db, year):
+    """Rebuild every employee's stored `year` carry_in from their stored chain under
+    the current policy caps — run after the carry-over caps change so persisted
+    carry_in (which `max_carry_over` feeds) isn't left stale. Iterates the whole
+    employees table via Scan; the reserved central-policy item is skipped."""
+    scan_kwargs = {}
+    while True:
+        resp = db.employees.scan(**scan_kwargs)
+        for item in resp["Items"]:
+            if item["slack_user_id"] == POLICY_KEY:
+                continue
+            recompute_carry_in(db, item, year)
+        if "LastEvaluatedKey" not in resp:
+            return
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
 def _vacation_available(base, carry_in, max_total):
