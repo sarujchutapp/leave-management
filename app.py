@@ -19,20 +19,45 @@ from leave.sheets_client import SheetsClient
 from leave.blocks import (
     APPROVE_ACTION,
     CANCEL_CALLBACK_ID,
+    CARRY_OVER_ACTION,
+    CARRY_OVER_CALLBACK_ID,
+    CLEAR_ACTION,
+    CLEAR_CALLBACK_ID,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
     LEAVE_CALLBACK_ID,
+    LEAVE_LIMITS_ACTION,
+    LEAVE_LIMITS_CALLBACK_ID,
+    MANAGE_EMPLOYEES_ACTION,
+    MANAGE_EMPLOYEES_CALLBACK_ID,
+    REPORT_ACTION,
+    VIEW_SETTINGS_ACTION,
 )
 from leave.handlers import (
     handle_approve,
     handle_decline_click,
     handle_decline_submit,
+    handle_report,
     open_cancel_modal,
+    open_carry_over,
+    open_clear,
+    open_control_menu,
+    open_leave_limits,
     open_leave_modal,
+    open_manage_employees,
+    open_view_settings,
     submit_cancel,
+    submit_carry_over,
+    submit_carry_over_ack,
+    submit_carry_over_apply,
+    submit_clear,
+    submit_clear_ack,
+    submit_clear_apply,
     submit_leave,
     submit_leave_ack,
     submit_leave_apply,
+    submit_leave_limits,
+    submit_manage_employees,
 )
 
 load_dotenv()
@@ -45,6 +70,13 @@ def _ack(ack):
 def _noop_ack(*args, **kwargs):
     """Ack placeholder for handlers invoked as lazy listeners — the real ack
     already ran in the ack phase, so the handler's own ack() call is a no-op."""
+
+
+def _admin_ids():
+    """Slack member IDs allowed to use /control, from the non-secret SLACK_ADMIN_IDS
+    env var (comma-separated). Empty/unset means no admins."""
+    raw = os.environ.get("SLACK_ADMIN_IDS", "")
+    return {x.strip() for x in raw.split(",") if x.strip()}
 
 
 def build_app(calendar=None, faas=False):
@@ -92,6 +124,52 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             open_cancel_modal(ack, body, client, d)
 
+    # Admin control plane. The menu open + View Settings only open modals / do a
+    # keyed policy read (fast), so they run synchronously in both run modes. The
+    # admin allowlist is injected, not read inside the handlers.
+    admin_ids = _admin_ids()
+
+    @app.command("/control")
+    def _control(ack, body, client):
+        open_control_menu(ack, body, client, admin_ids)
+
+    @app.action(VIEW_SETTINGS_ACTION)
+    def _view_settings(ack, body, client):
+        with db.connect() as d:
+            open_view_settings(ack, body, client, d, admin_ids)
+
+    @app.action(LEAVE_LIMITS_ACTION)
+    def _leave_limits(ack, body, client):
+        with db.connect() as d:
+            open_leave_limits(ack, body, client, d, admin_ids)
+
+    # Leave-limits submit is validate + a single PutItem (fast, well under 3s), so
+    # it runs synchronously in both run modes rather than as a lazy listener.
+    @app.view(LEAVE_LIMITS_CALLBACK_ID)
+    def _leave_limits_submit(ack, body, view):
+        with db.connect() as d:
+            submit_leave_limits(ack, body, view, d, admin_ids)
+
+    @app.action(CARRY_OVER_ACTION)
+    def _carry_over(ack, body, client):
+        with db.connect() as d:
+            open_carry_over(ack, body, client, d, admin_ids)
+
+    @app.action(CLEAR_ACTION)
+    def _clear(ack, body, client):
+        open_clear(ack, body, client, admin_ids)
+
+    @app.action(MANAGE_EMPLOYEES_ACTION)
+    def _manage_employees(ack, body, client):
+        open_manage_employees(ack, body, client, admin_ids)
+
+    # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
+    # fast, so it runs synchronously in both run modes.
+    @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
+    def _manage_employees_submit(ack, body, view):
+        with db.connect() as d:
+            submit_manage_employees(ack, body, view, d, admin_ids)
+
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):
         with db.connect() as d:
@@ -126,15 +204,54 @@ def build_app(calendar=None, faas=False):
             with db.connect() as d:
                 submit_cancel(_noop_ack, body, view, client, d, get_calendar(), get_sheets())
 
+        def _report_lazy(body, client):
+            with db.connect() as d:
+                handle_report(_noop_ack, body, client, d, admin_ids)
+
         app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
         app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
+        # Report: building the all-employee CSV (a Scan) + the upload run post-ack.
+        app.action(REPORT_ACTION)(ack=_ack, lazy=[_report_lazy])
+
+        # Carry-over submit: write the caps in the ack phase, then recompute every
+        # employee's stored carry_in post-ack (a Scan) so the ack stays under 3s.
+        def _carry_over_ack(ack, body, view):
+            with db.connect() as d:
+                submit_carry_over_ack(ack, body, view, d, admin_ids)
+
+        def _carry_over_lazy(body, view):
+            with db.connect() as d:
+                submit_carry_over_apply(body, view, d, admin_ids)
+
+        app.view(CARRY_OVER_CALLBACK_ID)(ack=_carry_over_ack, lazy=[_carry_over_lazy])
+
+        # Clear submit: confirm in the ack phase, then wipe post-ack (scan + deletes
+        # + calendar API + board), so the ack stays under 3s.
+        def _clear_ack(ack, body, view):
+            submit_clear_ack(ack, body, view, admin_ids)
+
+        def _clear_lazy(body, view):
+            with db.connect() as d:
+                submit_clear_apply(body, view, d, get_calendar(), get_sheets(), admin_ids)
+
+        app.view(CLEAR_CALLBACK_ID)(ack=_clear_ack, lazy=[_clear_lazy])
     else:
 
         @app.view(LEAVE_CALLBACK_ID)
         def _submit(ack, body, view, client):
             with db.connect() as d:
                 submit_leave(ack, body, view, client, d, get_calendar(), get_sheets())
+
+        @app.view(CARRY_OVER_CALLBACK_ID)
+        def _carry_over_submit(ack, body, view):
+            with db.connect() as d:
+                submit_carry_over(ack, body, view, d, admin_ids)
+
+        @app.view(CLEAR_CALLBACK_ID)
+        def _clear_submit(ack, body, view):
+            with db.connect() as d:
+                submit_clear(ack, body, view, d, get_calendar(), get_sheets(), admin_ids)
 
         @app.action(APPROVE_ACTION)
         def _approve(ack, body, client):
@@ -150,6 +267,11 @@ def build_app(calendar=None, faas=False):
         def _cancel(ack, body, view, client):
             with db.connect() as d:
                 submit_cancel(ack, body, view, client, d, get_calendar(), get_sheets())
+
+        @app.action(REPORT_ACTION)
+        def _report(ack, body, client):
+            with db.connect() as d:
+                handle_report(ack, body, client, d, admin_ids)
 
     return app
 

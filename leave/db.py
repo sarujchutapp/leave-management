@@ -42,3 +42,16 @@ def connect():
 def get_employee(db, slack_user_id):
     """Return the employee item (dict) or None if not registered."""
     return db.employees.get_item(Key={"slack_user_id": slack_user_id}).get("Item")
+
+
+def list_reports(db, manager_id):
+    """Employees whose manager is `manager_id` — the block-and-tell delete guard.
+    Scans the employees table; the reserved policy/board items have no manager_id
+    so they never match."""
+    reports, scan_kwargs = [], {}
+    while True:
+        resp = db.employees.scan(**scan_kwargs)
+        reports += [i for i in resp["Items"] if i.get("manager_id") == manager_id]
+        if "LastEvaluatedKey" not in resp:
+            return reports
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]

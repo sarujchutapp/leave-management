@@ -8,6 +8,23 @@ DECLINE_ACTION = "decline_request"
 DECLINE_CALLBACK_ID = "decline_submit"
 CANCEL_CALLBACK_ID = "cancel_submit"
 
+# Admin control plane (/control). The menu is a modal of buttons; each button is a
+# block action routing to a sub-modal. Only View Settings is wired in this slice.
+CONTROL_MENU_CALLBACK_ID = "control_menu"
+SETTINGS_VIEW_CALLBACK_ID = "control_settings_view"
+LEAVE_LIMITS_CALLBACK_ID = "control_leave_limits_submit"
+CARRY_OVER_CALLBACK_ID = "control_carry_over_submit"
+CLEAR_CALLBACK_ID = "control_clear_submit"
+# Typed exactly to confirm the destructive Clear wipe.
+CLEAR_CONFIRM_WORD = "CLEAR"
+MANAGE_EMPLOYEES_CALLBACK_ID = "control_manage_employees_submit"
+VIEW_SETTINGS_ACTION = "control_view_settings"
+LEAVE_LIMITS_ACTION = "control_leave_limits"
+CARRY_OVER_ACTION = "control_carry_over"
+CLEAR_ACTION = "control_clear"
+REPORT_ACTION = "control_report"
+MANAGE_EMPLOYEES_ACTION = "control_manage_employees"
+
 
 def format_period(start, end, half=None):
     """Human-readable leave period. A half-day is a single date and shows which
@@ -207,5 +224,242 @@ def build_cancel_modal(rows):
                     "options": options,
                 },
             }
+        ],
+    }
+
+
+# Menu buttons, in display order. Each names an admin action; only View Settings
+# is wired so far — the rest are present-but-inert until their slices land.
+_CONTROL_BUTTONS = [
+    (LEAVE_LIMITS_ACTION, "Leave limits"),
+    (CARRY_OVER_ACTION, "Carry-over"),
+    (CLEAR_ACTION, "Clear"),
+    (REPORT_ACTION, "Report"),
+    (MANAGE_EMPLOYEES_ACTION, "Manage employees"),
+    (VIEW_SETTINGS_ACTION, "View settings"),
+]
+
+
+def build_control_menu():
+    """The /control admin menu: a button per admin action. No submit — each button
+    is a block action that opens its own sub-modal."""
+    return {
+        "type": "modal",
+        "callback_id": CONTROL_MENU_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Admin Control"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Pick an admin action:"},
+            },
+            {
+                "type": "actions",
+                "block_id": "control_actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": action_id,
+                        "text": {"type": "plain_text", "text": label},
+                    }
+                    for action_id, label in _CONTROL_BUTTONS
+                ],
+            },
+        ],
+    }
+
+
+def _number_input(block_id, label, value):
+    """A single-line text input pre-filled with the current value. Numeric
+    validation happens server-side on submit (see handlers), so the value is
+    plain text here."""
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "label": {"type": "plain_text", "text": label},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "value",
+            "initial_value": str(value),
+        },
+    }
+
+
+def build_leave_limits_modal(policy):
+    """Edit base allowance per type + the vacation consecutive limit, pre-filled
+    from the current central policy."""
+    allowances = policy["allowances"]
+    return {
+        "type": "modal",
+        "callback_id": LEAVE_LIMITS_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Leave Limits"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            _number_input("sick", "Sick allowance (days)", allowances["sick"]),
+            _number_input("vacation", "Vacation allowance (days)", allowances["vacation"]),
+            _number_input("personal", "Personal allowance (days)", allowances["personal"]),
+            _number_input(
+                "consecutive_limit",
+                "Vacation consecutive limit (days)",
+                policy["consecutive_limit"]["vacation"],
+            ),
+        ],
+    }
+
+
+def build_carry_over_modal(policy):
+    """Edit the vacation carry-over caps, pre-filled from the current central policy."""
+    return {
+        "type": "modal",
+        "callback_id": CARRY_OVER_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Carry-over"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            _number_input(
+                "max_carry_over",
+                "Max carry over (vacation days)",
+                policy["max_carry_over"]["vacation"],
+            ),
+            _number_input(
+                "max_total",
+                "Max total (vacation days)",
+                policy["max_total"]["vacation"],
+            ),
+        ],
+    }
+
+
+def _optional_user_select(block_id, label, placeholder):
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": {
+            "type": "users_select",
+            "action_id": "value",
+            "placeholder": {"type": "plain_text", "text": placeholder},
+        },
+    }
+
+
+def _optional_text(block_id, label):
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": {"type": "plain_text_input", "action_id": "value"},
+    }
+
+
+def build_manage_employees_modal():
+    """Add/edit (reuses the fields below) or delete an employee. The employee and
+    manager are picked by Slack user-picker, so member IDs are supplied directly.
+    Delete is block-and-tell: a manager with reports is rejected until reassigned."""
+    return {
+        "type": "modal",
+        "callback_id": MANAGE_EMPLOYEES_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Manage Employees"},
+        "submit": {"type": "plain_text", "text": "Apply"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "employee",
+                "label": {"type": "plain_text", "text": "Employee"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "action",
+                "label": {"type": "plain_text", "text": "Action"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "initial_option": {
+                        "text": {"type": "plain_text", "text": "Add / edit"},
+                        "value": "save",
+                    },
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Add / edit"}, "value": "save"},
+                        {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
+                    ],
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Add / edit uses the fields below. Delete ignores them and is "
+                        "blocked while the person still manages anyone.",
+                    }
+                ],
+            },
+            _optional_text("name", "Name (add / edit)"),
+            _optional_user_select("manager", "Manager (add / edit)", "Pick a manager"),
+            _optional_text("override_sick", "Sick override (optional)"),
+            _optional_text("override_vacation", "Vacation override (optional)"),
+            _optional_text("override_personal", "Personal override (optional)"),
+        ],
+    }
+
+
+def build_clear_modal():
+    """Destructive wipe, gated by a typed confirmation word. Submitting anything
+    but the exact word returns a validation error and wipes nothing."""
+    return {
+        "type": "modal",
+        "callback_id": CLEAR_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Clear All Leave"},
+        "submit": {"type": "plain_text", "text": "Clear"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "This deletes *all* leave requests, their calendar events, and "
+                        "resets the board. Employees, policy, and holidays are kept. "
+                        "This cannot be undone."
+                    ),
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "confirm",
+                "label": {"type": "plain_text", "text": f"Type {CLEAR_CONFIRM_WORD} to confirm"},
+                "element": {"type": "plain_text_input", "action_id": "value"},
+            },
+        ],
+    }
+
+
+def build_settings_view(policy):
+    """Read-only view of the current central policy (allowances + caps)."""
+    allowances = "   ·   ".join(
+        f"*{t}*: {policy['allowances'][t]}" for t in LEAVE_TYPES
+    )
+    lines = [
+        f"*Allowances* — {allowances}",
+        f"*Max carry over* (vacation): {policy['max_carry_over']['vacation']}",
+        f"*Max total* (vacation): {policy['max_total']['vacation']}",
+        f"*Consecutive limit* (vacation): {policy['consecutive_limit']['vacation']}",
+    ]
+    return {
+        "type": "modal",
+        "callback_id": SETTINGS_VIEW_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Current Settings"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
         ],
     }

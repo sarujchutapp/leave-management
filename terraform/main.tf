@@ -94,13 +94,25 @@ resource "aws_iam_role_policy_attachment" "basic_execution" {
 data "aws_iam_policy_document" "lambda" {
   # UpdateItem: the lazy vacation carry_in write (one map attribute per employee
   # per year). GetItem covers employee + the reserved central-policy item.
+  # PutItem: writing the central policy item from /control (Leave limits, #31) and
+  # upserting employees (Manage employees, #35).
+  # Scan: the carry-over recompute-all (#32), the all-employee report (#34), and
+  # the manage-employees delete guard (#35).
+  # DeleteItem: removing an employee from Manage employees (#35).
   statement {
-    sid       = "EmployeesReadWrite"
-    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    sid = "EmployeesReadWrite"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:Scan",
+      "dynamodb:DeleteItem",
+    ]
     resources = [aws_dynamodb_table.employees.arn]
   }
 
-  # No DeleteItem — cancelling a request is an UpdateItem, never a delete.
+  # Cancelling a request is an UpdateItem. Scan + DeleteItem are for the /control
+  # Clear wipe (#33), which scans every request and batch-deletes the rows.
   statement {
     sid = "RequestsReadWrite"
     actions = [
@@ -108,6 +120,8 @@ data "aws_iam_policy_document" "lambda" {
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
       "dynamodb:Query",
+      "dynamodb:Scan",
+      "dynamodb:DeleteItem",
     ]
     resources = [
       aws_dynamodb_table.requests.arn,
@@ -182,6 +196,7 @@ resource "aws_lambda_function" "leave_bot" {
       HOLIDAYS_TABLE               = var.holidays_table
       LEAVE_BOARD_CHANNEL          = var.leave_board_channel
       LEAVE_SHEET_ID               = var.leave_sheet_id
+      SLACK_ADMIN_IDS              = var.slack_admin_ids
       TEAM_CALENDAR_ID             = var.team_calendar_id
       GOOGLE_SERVICE_ACCOUNT_FILE  = "/tmp/service-account.json"
       SLACK_BOT_TOKEN_PARAM        = local.ssm_bot_token_param
