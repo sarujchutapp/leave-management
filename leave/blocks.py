@@ -8,6 +8,17 @@ DECLINE_ACTION = "decline_request"
 DECLINE_CALLBACK_ID = "decline_submit"
 CANCEL_CALLBACK_ID = "cancel_submit"
 
+# Admin control plane (/control). The menu is a modal of buttons; each button is a
+# block action routing to a sub-modal. Only View Settings is wired in this slice.
+CONTROL_MENU_CALLBACK_ID = "control_menu"
+SETTINGS_VIEW_CALLBACK_ID = "control_settings_view"
+VIEW_SETTINGS_ACTION = "control_view_settings"
+LEAVE_LIMITS_ACTION = "control_leave_limits"
+CARRY_OVER_ACTION = "control_carry_over"
+CLEAR_ACTION = "control_clear"
+REPORT_ACTION = "control_report"
+MANAGE_EMPLOYEES_ACTION = "control_manage_employees"
+
 
 def format_period(start, end, half=None):
     """Human-readable leave period. A half-day is a single date and shows which
@@ -207,5 +218,68 @@ def build_cancel_modal(rows):
                     "options": options,
                 },
             }
+        ],
+    }
+
+
+# Menu buttons, in display order. Each names an admin action; only View Settings
+# is wired so far — the rest are present-but-inert until their slices land.
+_CONTROL_BUTTONS = [
+    (LEAVE_LIMITS_ACTION, "Leave limits"),
+    (CARRY_OVER_ACTION, "Carry-over"),
+    (CLEAR_ACTION, "Clear"),
+    (REPORT_ACTION, "Report"),
+    (MANAGE_EMPLOYEES_ACTION, "Manage employees"),
+    (VIEW_SETTINGS_ACTION, "View settings"),
+]
+
+
+def build_control_menu():
+    """The /control admin menu: a button per admin action. No submit — each button
+    is a block action that opens its own sub-modal."""
+    return {
+        "type": "modal",
+        "callback_id": CONTROL_MENU_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Admin Control"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Pick an admin action:"},
+            },
+            {
+                "type": "actions",
+                "block_id": "control_actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": action_id,
+                        "text": {"type": "plain_text", "text": label},
+                    }
+                    for action_id, label in _CONTROL_BUTTONS
+                ],
+            },
+        ],
+    }
+
+
+def build_settings_view(policy):
+    """Read-only view of the current central policy (allowances + caps)."""
+    allowances = "   ·   ".join(
+        f"*{t}*: {policy['allowances'][t]}" for t in LEAVE_TYPES
+    )
+    lines = [
+        f"*Allowances* — {allowances}",
+        f"*Max carry over* (vacation): {policy['max_carry_over']['vacation']}",
+        f"*Max total* (vacation): {policy['max_total']['vacation']}",
+        f"*Consecutive limit* (vacation): {policy['consecutive_limit']['vacation']}",
+    ]
+    return {
+        "type": "modal",
+        "callback_id": SETTINGS_VIEW_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Current Settings"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
         ],
     }

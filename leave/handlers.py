@@ -9,15 +9,18 @@ from datetime import date
 
 from leave.blocks import (
     build_cancel_modal,
+    build_control_menu,
     build_decision_notice,
     build_decline_modal,
     build_leave_modal,
+    build_settings_view,
     build_ticket,
     format_period,
 )
 from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import get_employee
+from leave.policy import get_policy
 from leave.requests import (
     approve_request,
     can_cancel,
@@ -37,6 +40,34 @@ CONTACT_ADMIN = "You're not set up in the leave system yet — please contact yo
 NOT_APPROVER = "You're not the approver for this request."
 NOTHING_TO_CANCEL = "You have no requests to cancel."
 CANNOT_CANCEL = "That request can no longer be cancelled."
+NOT_ADMIN = "Sorry, /control is for admins only."
+
+
+def is_admin(user_id, admin_ids):
+    """True if the Slack user is in the injected admin allowlist. The allowlist is
+    passed in (sourced from SLACK_ADMIN_IDS in app.py) so tests can set it directly.
+    An empty allowlist admits no one."""
+    return user_id in admin_ids
+
+
+def open_control_menu(ack, body, client, admin_ids):
+    """`/control`: admins get the menu modal; everyone else gets a non-actionable
+    note. Fast (modal open only), so it runs synchronously in both run modes."""
+    if not is_admin(body["user_id"], admin_ids):
+        ack(NOT_ADMIN)
+        return
+    ack()
+    client.views_open(trigger_id=body["trigger_id"], view=build_control_menu())
+
+
+def open_view_settings(ack, body, client, db, admin_ids):
+    """View Settings button: re-checks admin (defense in depth, since the gate must
+    hold on every sub-action, not just at command time) and pushes a read-only view
+    of the current central policy."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(trigger_id=body["trigger_id"], view=build_settings_view(get_policy(db)))
 
 
 def open_leave_modal(ack, body, client, db, today=None):

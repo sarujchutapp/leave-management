@@ -19,20 +19,38 @@ from leave.sheets_client import SheetsClient
 from leave.blocks import (
     APPROVE_ACTION,
     CANCEL_CALLBACK_ID,
+    CARRY_OVER_ACTION,
+    CLEAR_ACTION,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
     LEAVE_CALLBACK_ID,
+    LEAVE_LIMITS_ACTION,
+    MANAGE_EMPLOYEES_ACTION,
+    REPORT_ACTION,
+    VIEW_SETTINGS_ACTION,
 )
 from leave.handlers import (
     handle_approve,
     handle_decline_click,
     handle_decline_submit,
     open_cancel_modal,
+    open_control_menu,
     open_leave_modal,
+    open_view_settings,
     submit_cancel,
     submit_leave,
     submit_leave_ack,
     submit_leave_apply,
+)
+
+# Buttons whose features aren't built yet: acked so Bolt doesn't log them as
+# unhandled. Their slices (#31–#35) will replace these with real handlers.
+INERT_CONTROL_ACTIONS = (
+    LEAVE_LIMITS_ACTION,
+    CARRY_OVER_ACTION,
+    CLEAR_ACTION,
+    REPORT_ACTION,
+    MANAGE_EMPLOYEES_ACTION,
 )
 
 load_dotenv()
@@ -45,6 +63,13 @@ def _ack(ack):
 def _noop_ack(*args, **kwargs):
     """Ack placeholder for handlers invoked as lazy listeners — the real ack
     already ran in the ack phase, so the handler's own ack() call is a no-op."""
+
+
+def _admin_ids():
+    """Slack member IDs allowed to use /control, from the non-secret SLACK_ADMIN_IDS
+    env var (comma-separated). Empty/unset means no admins."""
+    raw = os.environ.get("SLACK_ADMIN_IDS", "")
+    return {x.strip() for x in raw.split(",") if x.strip()}
 
 
 def build_app(calendar=None, faas=False):
@@ -91,6 +116,23 @@ def build_app(calendar=None, faas=False):
     def _open_cancel(ack, body, client):
         with db.connect() as d:
             open_cancel_modal(ack, body, client, d)
+
+    # Admin control plane. The menu open + View Settings only open modals / do a
+    # keyed policy read (fast), so they run synchronously in both run modes. The
+    # admin allowlist is injected, not read inside the handlers.
+    admin_ids = _admin_ids()
+
+    @app.command("/control")
+    def _control(ack, body, client):
+        open_control_menu(ack, body, client, admin_ids)
+
+    @app.action(VIEW_SETTINGS_ACTION)
+    def _view_settings(ack, body, client):
+        with db.connect() as d:
+            open_view_settings(ack, body, client, d, admin_ids)
+
+    for action_id in INERT_CONTROL_ACTIONS:
+        app.action(action_id)(_ack)
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):

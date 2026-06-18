@@ -50,6 +50,12 @@ variable "leave_sheet_id" {
   default     = ""
 }
 
+variable "slack_admin_ids" {
+  type        = string
+  description = "Comma-separated Slack member IDs allowed to use /control (admin control plane). Non-secret. Empty disables admin actions."
+  default     = ""
+}
+
 variable "ssm_parameter_prefix" {
   type        = string
   description = "Path prefix for the three SSM SecureString parameters holding the secrets."

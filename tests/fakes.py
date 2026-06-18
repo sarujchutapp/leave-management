@@ -87,12 +87,17 @@ class FakeAck:
 class FakeSlackClient:
     def __init__(self):
         self.views_open_calls = []
+        self.views_push_calls = []
         self.chat_postMessage_calls = []
         self.views_update_calls = []
         self.chat_update_calls = []
 
     def views_open(self, **kwargs):
         self.views_open_calls.append(kwargs)
+        return {"ok": True}
+
+    def views_push(self, **kwargs):
+        self.views_push_calls.append(kwargs)
         return {"ok": True}
 
     def chat_postMessage(self, **kwargs):
