@@ -35,10 +35,21 @@ The concrete number of days carried into a given year for a single employee:
 that individual's unused days). It is the one balance figure that is persisted; everything
 else within the current year stays derived live.
 
+**Admin**:
+A single Slack user authorized to manage company-wide configuration (leave policy,
+holidays, etc.) from Slack, without touching code. Identified by an allowlist of Slack
+member IDs (currently exactly one). Distinct from a **manager/approver**, which is a
+per-employee relationship for approving leave — being an admin grants no approval role
+and vice versa.
+_Avoid_: owner, superuser, top of chain
+
 **Leave policy**:
 The company-wide configuration that governs balances, kept in one central place (not
 copied onto each employee): per leave type, the **base allowance**, **max carry over**,
-and **max total**. Changing policy is a single edit.
+**max total**, and the **consecutive limit**. Changing policy is a single edit — by an
+**Admin** from Slack, or in code. The Slack editor splits the knobs across two modals:
+*leave limits* (base allowance per type + consecutive limit) and *carry-over* (max carry
+over + max total).
 
 **Allowance**:
 The fresh annual grant of a leave type. The **base allowance** comes from the central
