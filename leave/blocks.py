@@ -12,6 +12,7 @@ CANCEL_CALLBACK_ID = "cancel_submit"
 # block action routing to a sub-modal. Only View Settings is wired in this slice.
 CONTROL_MENU_CALLBACK_ID = "control_menu"
 SETTINGS_VIEW_CALLBACK_ID = "control_settings_view"
+LEAVE_LIMITS_CALLBACK_ID = "control_leave_limits_submit"
 VIEW_SETTINGS_ACTION = "control_view_settings"
 LEAVE_LIMITS_ACTION = "control_leave_limits"
 CARRY_OVER_ACTION = "control_carry_over"
@@ -259,6 +260,45 @@ def build_control_menu():
                     for action_id, label in _CONTROL_BUTTONS
                 ],
             },
+        ],
+    }
+
+
+def _number_input(block_id, label, value):
+    """A single-line text input pre-filled with the current value. Numeric
+    validation happens server-side on submit (see handlers), so the value is
+    plain text here."""
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "label": {"type": "plain_text", "text": label},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "value",
+            "initial_value": str(value),
+        },
+    }
+
+
+def build_leave_limits_modal(policy):
+    """Edit base allowance per type + the vacation consecutive limit, pre-filled
+    from the current central policy."""
+    allowances = policy["allowances"]
+    return {
+        "type": "modal",
+        "callback_id": LEAVE_LIMITS_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Leave Limits"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            _number_input("sick", "Sick allowance (days)", allowances["sick"]),
+            _number_input("vacation", "Vacation allowance (days)", allowances["vacation"]),
+            _number_input("personal", "Personal allowance (days)", allowances["personal"]),
+            _number_input(
+                "consecutive_limit",
+                "Vacation consecutive limit (days)",
+                policy["consecutive_limit"]["vacation"],
+            ),
         ],
     }
 

@@ -25,6 +25,7 @@ from leave.blocks import (
     DECLINE_CALLBACK_ID,
     LEAVE_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
+    LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_EMPLOYEES_ACTION,
     REPORT_ACTION,
     VIEW_SETTINGS_ACTION,
@@ -35,18 +36,19 @@ from leave.handlers import (
     handle_decline_submit,
     open_cancel_modal,
     open_control_menu,
+    open_leave_limits,
     open_leave_modal,
     open_view_settings,
     submit_cancel,
     submit_leave,
     submit_leave_ack,
     submit_leave_apply,
+    submit_leave_limits,
 )
 
 # Buttons whose features aren't built yet: acked so Bolt doesn't log them as
-# unhandled. Their slices (#31–#35) will replace these with real handlers.
+# unhandled. Their slices (#32–#35) will replace these with real handlers.
 INERT_CONTROL_ACTIONS = (
-    LEAVE_LIMITS_ACTION,
     CARRY_OVER_ACTION,
     CLEAR_ACTION,
     REPORT_ACTION,
@@ -130,6 +132,18 @@ def build_app(calendar=None, faas=False):
     def _view_settings(ack, body, client):
         with db.connect() as d:
             open_view_settings(ack, body, client, d, admin_ids)
+
+    @app.action(LEAVE_LIMITS_ACTION)
+    def _leave_limits(ack, body, client):
+        with db.connect() as d:
+            open_leave_limits(ack, body, client, d, admin_ids)
+
+    # Leave-limits submit is validate + a single PutItem (fast, well under 3s), so
+    # it runs synchronously in both run modes rather than as a lazy listener.
+    @app.view(LEAVE_LIMITS_CALLBACK_ID)
+    def _leave_limits_submit(ack, body, view):
+        with db.connect() as d:
+            submit_leave_limits(ack, body, view, d, admin_ids)
 
     for action_id in INERT_CONTROL_ACTIONS:
         app.action(action_id)(_ack)

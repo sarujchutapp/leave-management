@@ -12,6 +12,7 @@ from leave.blocks import (
     build_control_menu,
     build_decision_notice,
     build_decline_modal,
+    build_leave_limits_modal,
     build_leave_modal,
     build_settings_view,
     build_ticket,
@@ -20,7 +21,7 @@ from leave.blocks import (
 from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import get_employee
-from leave.policy import get_policy
+from leave.policy import get_policy, set_policy
 from leave.requests import (
     approve_request,
     can_cancel,
@@ -68,6 +69,64 @@ def open_view_settings(ack, body, client, db, admin_ids):
     if not is_admin(body["user"]["id"], admin_ids):
         return
     client.views_push(trigger_id=body["trigger_id"], view=build_settings_view(get_policy(db)))
+
+
+# Block_ids of the leave-limits modal, also the keys of the parsed values. The
+# first three are per-type allowances; the last is the vacation consecutive limit.
+_LIMIT_FIELDS = ("sick", "vacation", "personal", "consecutive_limit")
+
+
+def open_leave_limits(ack, body, client, db, admin_ids):
+    """Leave limits button: re-checks admin, then pushes the modal pre-filled from
+    the current central policy."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(trigger_id=body["trigger_id"], view=build_leave_limits_modal(get_policy(db)))
+
+
+def _parse_int(raw):
+    """(value, None) for a non-negative whole number, else (None, error)."""
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return None, "Enter a whole number."
+    if n < 0:
+        return None, "Must be zero or greater."
+    return n, None
+
+
+def submit_leave_limits(ack, body, view, db, admin_ids):
+    """Leave limits submit: re-check admin, validate every field, and on success
+    write the new allowances + consecutive limit. Reads the current policy to keep
+    the carry-over caps (set_policy overwrites the whole item) intact."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return
+    values = view["state"]["values"]
+    parsed, errors = {}, {}
+    for field in _LIMIT_FIELDS:
+        n, err = _parse_int(values[field]["value"]["value"])
+        if err:
+            errors[field] = err
+        else:
+            parsed[field] = n
+    if errors:
+        ack(response_action="errors", errors=errors)
+        return
+    ack()
+    policy = get_policy(db)
+    set_policy(
+        db,
+        allowances={
+            "sick": parsed["sick"],
+            "vacation": parsed["vacation"],
+            "personal": parsed["personal"],
+        },
+        max_carry_over=policy["max_carry_over"],
+        max_total=policy["max_total"],
+        consecutive_limit={"vacation": parsed["consecutive_limit"]},
+    )
 
 
 def open_leave_modal(ack, body, client, db, today=None):

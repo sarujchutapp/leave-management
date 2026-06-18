@@ -94,9 +94,10 @@ resource "aws_iam_role_policy_attachment" "basic_execution" {
 data "aws_iam_policy_document" "lambda" {
   # UpdateItem: the lazy vacation carry_in write (one map attribute per employee
   # per year). GetItem covers employee + the reserved central-policy item.
+  # PutItem: writing the central policy item from /control (Leave limits, #31).
   statement {
     sid       = "EmployeesReadWrite"
-    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.employees.arn]
   }
 
