@@ -8,9 +8,10 @@ One-time provisioning of the three external resources, then a smoke check. All s
 2. **Slash Commands** → Create New Command for each, any request URL placeholder (Socket Mode ignores it):
    - `/dayoff` — request leave
    - `/dayoff-cancel` — cancel a pending or upcoming-approved request
+   - `/control` — admin control plane (gated by `SLACK_ADMIN_IDS`)
 3. **Socket Mode** → toggle on. When prompted, generate an **App-Level Token** with scope `connections:write` → copy it (`xapp-...`) into `SLACK_APP_TOKEN`.
 4. **Interactivity & Shortcuts** → toggle on (URL is ignored under Socket Mode).
-5. **OAuth & Permissions** → Bot Token Scopes → add `chat:write` and `commands`. (Modals and DMs are covered by these.)
+5. **OAuth & Permissions** → Bot Token Scopes → add `chat:write` and `commands`. (Modals and DMs are covered by these.) Add `files:write` too if you use `/control` → Report, which uploads the usage CSV to the admin's DM.
 6. **Install App** to the workspace → copy the **Bot User OAuth Token** (`xoxb-...`) into `SLACK_BOT_TOKEN`.
 
 ## 2. AWS DynamoDB

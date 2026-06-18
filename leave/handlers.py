@@ -25,6 +25,7 @@ from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import get_employee
 from leave.policy import get_policy, set_policy
+from leave.report import build_report_csv
 from leave.requests import (
     approve_request,
     can_cancel,
@@ -244,6 +245,25 @@ def submit_clear(ack, body, view, db, calendar, sheets, admin_ids, today=None):
     """Synchronous submit (Socket Mode / tests): ack-with-confirmation, then wipe."""
     if submit_clear_ack(ack, body, view, admin_ids):
         submit_clear_apply(body, view, db, calendar, sheets, admin_ids, today)
+
+
+def handle_report(ack, body, client, db, admin_ids, today=None):
+    """Report button: re-checks admin, builds the all-employee CSV, and uploads it to
+    the admin's DM (not a shared channel). The Scan + upload run post-ack — ack()
+    here is a no-op in the lazy phase on Lambda, the real ack in Socket Mode."""
+    ack()
+    today = today or date.today()
+    user_id = body["user"]["id"]
+    if not is_admin(user_id, admin_ids):
+        return
+    csv_text = build_report_csv(db, today)
+    dm = client.conversations_open(users=user_id)
+    client.files_upload_v2(
+        channel=dm["channel"]["id"],
+        content=csv_text,
+        filename="leave-report.csv",
+        title="Leave usage report",
+    )
 
 
 def open_leave_modal(ack, body, client, db, today=None):

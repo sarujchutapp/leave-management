@@ -36,6 +36,7 @@ from leave.handlers import (
     handle_approve,
     handle_decline_click,
     handle_decline_submit,
+    handle_report,
     open_cancel_modal,
     open_carry_over,
     open_clear,
@@ -57,11 +58,8 @@ from leave.handlers import (
 )
 
 # Buttons whose features aren't built yet: acked so Bolt doesn't log them as
-# unhandled. Their slices (#34–#35) will replace these with real handlers.
-INERT_CONTROL_ACTIONS = (
-    REPORT_ACTION,
-    MANAGE_EMPLOYEES_ACTION,
-)
+# unhandled. Their slices (#35) will replace these with real handlers.
+INERT_CONTROL_ACTIONS = (MANAGE_EMPLOYEES_ACTION,)
 
 load_dotenv()
 
@@ -199,9 +197,15 @@ def build_app(calendar=None, faas=False):
             with db.connect() as d:
                 submit_cancel(_noop_ack, body, view, client, d, get_calendar(), get_sheets())
 
+        def _report_lazy(body, client):
+            with db.connect() as d:
+                handle_report(_noop_ack, body, client, d, admin_ids)
+
         app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
         app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
+        # Report: building the all-employee CSV (a Scan) + the upload run post-ack.
+        app.action(REPORT_ACTION)(ack=_ack, lazy=[_report_lazy])
 
         # Carry-over submit: write the caps in the ack phase, then recompute every
         # employee's stored carry_in post-ack (a Scan) so the ack stays under 3s.
@@ -256,6 +260,11 @@ def build_app(calendar=None, faas=False):
         def _cancel(ack, body, view, client):
             with db.connect() as d:
                 submit_cancel(ack, body, view, client, d, get_calendar(), get_sheets())
+
+        @app.action(REPORT_ACTION)
+        def _report(ack, body, client):
+            with db.connect() as d:
+                handle_report(ack, body, client, d, admin_ids)
 
     return app
 

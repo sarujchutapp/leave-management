@@ -1,3 +1,5 @@
+import csv
+import io
 from datetime import date
 
 from leave.blocks import (
@@ -14,6 +16,7 @@ from leave.board import BOARD_KEY, get_board
 from leave.db import get_employee
 from leave.handlers import (
     NOT_ADMIN,
+    handle_report,
     is_admin,
     open_carry_over,
     open_clear,
@@ -25,6 +28,7 @@ from leave.handlers import (
     submit_leave_limits,
 )
 from leave.holidays import holidays_for_year, upsert_holiday
+from leave.report import build_report_csv
 from leave.policy import POLICY_KEY, get_policy, set_policy
 from leave.requests import (
     approve_request,
@@ -503,3 +507,78 @@ def test_clear_requests_script_delegates_to_shared_function():
 
     # The script wipes via the same extracted function the handler uses.
     assert clear_requests.clear_all_requests is clear_all_requests
+
+
+# --- Report: all-employee CSV (#34) ------------------------------------------
+
+
+def _csv_rows(text):
+    return list(csv.reader(io.StringIO(text)))
+
+
+def test_report_csv_row_per_employee_and_type_with_derived_figures(db):
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
+    upsert_employee(db, "U_A", "Alice", None)
+    rid = create_request(db, "U_A", "vacation", date(2026, 6, 8), date(2026, 6, 11), None)  # 4 wd
+    approve_request(db, rid)
+
+    rows = _csv_rows(build_report_csv(db, TODAY))  # TODAY = 2026-06-08
+    assert rows[0] == ["employee", "leave type", "used", "remaining", "carry-in"]
+    by_type = {r[1]: r for r in rows[1:]}
+    # Figures match the derived balances: vacation used 4, remaining 10-4=6, carry 0.
+    assert by_type["vacation"][2:] == ["4", "6", "0"]
+    assert by_type["sick"][2:] == ["0", "30", "0"]
+    assert by_type["personal"][2:] == ["0", "5", "0"]
+
+
+def test_report_csv_skips_reserved_items(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    db.employees.update_item(
+        Key={"slack_user_id": BOARD_KEY},
+        UpdateExpression="SET entries = :e",
+        ExpressionAttributeValues={":e": {}},
+    )
+    names = {r[0] for r in _csv_rows(build_report_csv(db, TODAY))}
+    assert POLICY_KEY not in names and BOARD_KEY not in names
+    assert "Alice" in names
+
+
+def test_report_uploads_csv_to_admin_dm(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    client = FakeSlackClient()
+    ack = FakeAck()
+    handle_report(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.called
+    assert len(client.files_upload_v2_calls) == 1
+    call = client.files_upload_v2_calls[0]
+    # Uploaded to the admin's DM (opened for that user), not a shared channel.
+    assert call["channel"] == "D_U_ADMIN"
+    assert client.conversations_open_calls[0]["users"] == "U_ADMIN"
+    assert call["content"].startswith("employee,leave type,used,remaining,carry-in")
+    assert "Alice" in call["content"]
+
+
+def test_report_non_admin_rejected(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    client = FakeSlackClient()
+    ack = FakeAck()
+    handle_report(
+        ack=ack,
+        body={"user": {"id": "U_OTHER"}},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.called
+    assert client.files_upload_v2_calls == []
