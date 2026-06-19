@@ -18,6 +18,7 @@ CLEAR_CALLBACK_ID = "control_clear_submit"
 # Typed exactly to confirm the destructive Clear wipe.
 CLEAR_CONFIRM_WORD = "CLEAR"
 MANAGE_EMPLOYEES_CALLBACK_ID = "control_manage_employees_submit"
+REPORT_CALLBACK_ID = "control_report_submit"
 VIEW_SETTINGS_ACTION = "control_view_settings"
 LEAVE_LIMITS_ACTION = "control_leave_limits"
 CARRY_OVER_ACTION = "control_carry_over"
@@ -408,6 +409,52 @@ def build_manage_employees_modal():
             _optional_text("override_sick", "Sick override (optional)"),
             _optional_text("override_vacation", "Vacation override (optional)"),
             _optional_text("override_personal", "Personal override (optional)"),
+        ],
+    }
+
+
+def build_report_modal():
+    """Pick which report to send: all-employee quota, or one person's full leave
+    history. The person picker is used only for the history choice (validated on
+    submit). The CSV is DMed to the requesting admin."""
+    return {
+        "type": "modal",
+        "callback_id": REPORT_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Report"},
+        "submit": {"type": "plain_text", "text": "Send"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "report_type",
+                "label": {"type": "plain_text", "text": "Report"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "initial_option": {
+                        "text": {"type": "plain_text", "text": "All-employee quota"},
+                        "value": "quota",
+                    },
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "All-employee quota"}, "value": "quota"},
+                        {
+                            "text": {"type": "plain_text", "text": "One person's leave history"},
+                            "value": "history",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "person",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Person (for history)"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
+                },
+            },
         ],
     }
 

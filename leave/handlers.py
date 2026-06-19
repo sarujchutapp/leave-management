@@ -18,6 +18,7 @@ from leave.blocks import (
     build_leave_limits_modal,
     build_leave_modal,
     build_manage_employees_modal,
+    build_report_modal,
     build_settings_view,
     build_ticket,
     format_period,
@@ -26,7 +27,7 @@ from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import get_employee, list_reports
 from leave.policy import get_policy, set_policy
-from leave.report import build_report_csv
+from leave.report import build_history_csv, build_report_csv
 from leave.seed import delete_employee, upsert_employee
 from leave.requests import (
     approve_request,
@@ -266,26 +267,78 @@ def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today
         submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today)
 
 
-def handle_report(ack, body, client, db, admin_ids, today=None):
-    """Report button: re-checks admin, builds the all-employee CSV, and uploads it to
-    the admin's DM (not a shared channel). The Scan + upload run post-ack — ack()
-    here is a no-op in the lazy phase on Lambda, the real ack in Socket Mode."""
+def open_report(ack, body, client, admin_ids):
+    """Report button: re-checks admin, then pushes the report-type modal."""
     ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(trigger_id=body["trigger_id"], view=build_report_modal())
+
+
+def _report_choice(view):
+    values = view["state"]["values"]
+    report_type = values["report_type"]["value"]["selected_option"]["value"]
+    person = values.get("person", {}).get("value", {}).get("selected_user")
+    return report_type, person
+
+
+def submit_report_ack(ack, body, view, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate the choice. A history
+    report needs a person picked. Returns True so the caller builds + sends."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return False
+    report_type, person = _report_choice(view)
+    if report_type == "history" and not person:
+        ack(response_action="errors", errors={"person": "Pick the person whose history you want."})
+        return False
+    ack(response_action="clear")  # close the whole modal stack on success
+    return True
+
+
+def _dm_csv(client, user_id, csv_text, filename, title, intro):
+    """DM a CSV to the user via chat:write (auto-opens the IM; the response carries
+    the DM channel id), then upload the file there. No im:write scope needed."""
+    dm = client.chat_postMessage(channel=user_id, text=intro)
+    client.files_upload_v2(channel=dm["channel"], content=csv_text, filename=filename, title=title)
+
+
+def submit_report_apply(body, view, db, client, admin_ids, today=None):
+    """Post-ack work: build the chosen CSV and DM it to the requesting admin. Re-checks
+    admin + the choice because Lambda lazy listeners fire regardless of the ack."""
     today = today or date.today()
     user_id = body["user"]["id"]
     if not is_admin(user_id, admin_ids):
         return
-    csv_text = build_report_csv(db, today)
-    # chat:write already lets the bot DM the user (this auto-opens the IM) and the
-    # response carries that DM's channel id — so we upload the file there without the
-    # im:write scope conversations.open would otherwise require.
-    dm = client.chat_postMessage(channel=user_id, text="Here's the latest leave usage report:")
-    client.files_upload_v2(
-        channel=dm["channel"],
-        content=csv_text,
-        filename="leave-report.csv",
-        title="Leave usage report",
-    )
+    report_type, person = _report_choice(view)
+    if report_type == "history":
+        if not person:
+            return
+        employee = get_employee(db, person)
+        name = (employee or {}).get("real_name", person)
+        _dm_csv(
+            client,
+            user_id,
+            build_history_csv(db, person),
+            f"leave-history-{person}.csv",
+            f"Leave history — {name}",
+            f"Leave history for {name}:",
+        )
+    else:
+        _dm_csv(
+            client,
+            user_id,
+            build_report_csv(db, today),
+            "leave-report.csv",
+            "Leave usage report",
+            "Here's the all-employee leave usage report:",
+        )
+
+
+def submit_report(ack, body, view, db, client, admin_ids, today=None):
+    """Synchronous submit (Socket Mode / tests): ack-with-validation, then build + DM."""
+    if submit_report_ack(ack, body, view, admin_ids):
+        submit_report_apply(body, view, db, client, admin_ids, today)
 
 
 _OVERRIDE_TYPES = ("sick", "vacation", "personal")

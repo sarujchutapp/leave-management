@@ -10,6 +10,7 @@ from leave.blocks import (
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
+    REPORT_CALLBACK_ID,
     SETTINGS_VIEW_CALLBACK_ID,
     VIEW_SETTINGS_ACTION,
 )
@@ -17,21 +18,22 @@ from leave.board import BOARD_KEY, get_board
 from leave.db import get_employee
 from leave.handlers import (
     NOT_ADMIN,
-    handle_report,
     is_admin,
     open_carry_over,
     open_clear,
     open_control_menu,
     open_leave_limits,
     open_manage_employees,
+    open_report,
     open_view_settings,
     submit_carry_over,
     submit_clear,
     submit_leave_limits,
     submit_manage_employees,
+    submit_report,
 )
 from leave.holidays import holidays_for_year, upsert_holiday
-from leave.report import build_report_csv
+from leave.report import build_history_csv, build_report_csv
 from leave.policy import POLICY_KEY, get_policy, set_policy
 from leave.requests import (
     approve_request,
@@ -603,30 +605,105 @@ def test_report_csv_skips_reserved_items(db):
     assert "Alice" in names
 
 
-def test_report_uploads_csv_to_admin_dm(db):
+def test_history_csv_lists_a_persons_requests_oldest_first(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    r1 = create_request(db, "U_A", "vacation", date(2026, 6, 10), date(2026, 6, 11), "trip")  # 2 wd
+    approve_request(db, r1)
+    create_request(db, "U_A", "sick", date(2026, 5, 4), date(2026, 5, 4), None)  # pending, earlier
+
+    rows = _csv_rows(build_history_csv(db, "U_A"))
+    assert rows[0] == [
+        "employee", "leave type", "start", "end", "half", "status",
+        "working days", "reason", "decline reason",
+    ]
+    # Oldest first: the May sick (pending) row precedes the June vacation row.
+    assert rows[1][1:6] == ["sick", "2026-05-04", "2026-05-04", "", "pending"]
+    assert rows[2][1:7] == ["vacation", "2026-06-10", "2026-06-11", "", "approved", "2"]
+    assert rows[2][7] == "trip"  # reason carried through
+
+
+def _report_view(report_type, person=None):
+    """A view_submission state payload matching build_report_modal."""
+    return {
+        "state": {
+            "values": {
+                "report_type": {"value": {"selected_option": {"value": report_type}}},
+                "person": {"value": {"selected_user": person}},
+            }
+        }
+    }
+
+
+def test_report_modal_opens_for_admin(db):
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_report(ack=ack, body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
+    view = client.views_push_calls[0]["view"]
+    assert view["callback_id"] == REPORT_CALLBACK_ID
+    assert any(b.get("block_id") == "report_type" for b in view["blocks"])
+
+
+def test_report_quota_dms_all_employee_csv(db):
     set_policy(db)
     upsert_employee(db, "U_A", "Alice", None)
     client = FakeSlackClient()
     ack = FakeAck()
-    handle_report(
+    submit_report(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        client=client,
+        view=_report_view("quota"),
         db=db,
+        client=client,
         admin_ids=ADMINS,
         today=TODAY,
     )
-    assert ack.called
-    # The bot DMs the requesting admin via chat:write (no conversations.open / im:write)...
-    assert len(client.chat_postMessage_calls) == 1
-    dm_channel = client.chat_postMessage_calls[0]["channel"]
-    assert dm_channel == "U_ADMIN"
-    # ...and uploads the CSV to that same DM channel, not a shared channel.
-    assert len(client.files_upload_v2_calls) == 1
+    assert ack.response == {"response_action": "clear"}  # modal closes on submit
     call = client.files_upload_v2_calls[0]
-    assert call["channel"] == dm_channel
+    assert call["channel"] == "U_ADMIN"  # the admin's DM
     assert call["content"].startswith("employee,leave type,used,remaining,carry-in")
-    assert "Alice" in call["content"]
+
+
+def test_report_history_dms_that_persons_csv(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    rid = create_request(db, "U_A", "vacation", date(2026, 6, 10), date(2026, 6, 11), None)
+    approve_request(db, rid)
+    client = FakeSlackClient()
+    ack = FakeAck()
+    submit_report(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_report_view("history", person="U_A"),
+        db=db,
+        client=client,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.response == {"response_action": "clear"}
+    call = client.files_upload_v2_calls[0]
+    assert call["channel"] == "U_ADMIN"
+    # It's the history CSV (history header), and it's about Alice.
+    assert call["content"].startswith("employee,leave type,start,end")
+    assert "Alice" in call["content"] and "2026-06-10" in call["content"]
+
+
+def test_report_history_without_person_is_rejected(db):
+    set_policy(db)
+    client = FakeSlackClient()
+    ack = FakeAck()
+    submit_report(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_report_view("history", person=None),
+        db=db,
+        client=client,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "person" in ack.response["errors"]
+    assert client.files_upload_v2_calls == []
 
 
 def test_report_non_admin_rejected(db):
@@ -634,11 +711,12 @@ def test_report_non_admin_rejected(db):
     upsert_employee(db, "U_A", "Alice", None)
     client = FakeSlackClient()
     ack = FakeAck()
-    handle_report(
+    submit_report(
         ack=ack,
         body={"user": {"id": "U_OTHER"}},
-        client=client,
+        view=_report_view("quota"),
         db=db,
+        client=client,
         admin_ids=ADMINS,
         today=TODAY,
     )
