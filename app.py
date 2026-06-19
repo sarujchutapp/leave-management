@@ -31,13 +31,13 @@ from leave.blocks import (
     MANAGE_EMPLOYEES_ACTION,
     MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
+    REPORT_CALLBACK_ID,
     VIEW_SETTINGS_ACTION,
 )
 from leave.handlers import (
     handle_approve,
     handle_decline_click,
     handle_decline_submit,
-    handle_report,
     open_cancel_modal,
     open_carry_over,
     open_clear,
@@ -45,6 +45,7 @@ from leave.handlers import (
     open_leave_limits,
     open_leave_modal,
     open_manage_employees,
+    open_report,
     open_view_settings,
     submit_cancel,
     submit_carry_over,
@@ -58,6 +59,9 @@ from leave.handlers import (
     submit_leave_apply,
     submit_leave_limits,
     submit_manage_employees,
+    submit_report,
+    submit_report_ack,
+    submit_report_apply,
 )
 
 load_dotenv()
@@ -163,6 +167,10 @@ def build_app(calendar=None, faas=False):
     def _manage_employees(ack, body, client):
         open_manage_employees(ack, body, client, admin_ids)
 
+    @app.action(REPORT_ACTION)
+    def _report(ack, body, client):
+        open_report(ack, body, client, admin_ids)
+
     # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
     # fast, so it runs synchronously in both run modes.
     @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
@@ -204,15 +212,20 @@ def build_app(calendar=None, faas=False):
             with db.connect() as d:
                 submit_cancel(_noop_ack, body, view, client, d, get_calendar(), get_sheets())
 
-        def _report_lazy(body, client):
-            with db.connect() as d:
-                handle_report(_noop_ack, body, client, d, admin_ids)
-
         app.action(APPROVE_ACTION)(ack=_ack, lazy=[_approve_lazy])
         app.view(DECLINE_CALLBACK_ID)(ack=_ack, lazy=[_decline_submit_lazy])
         app.view(CANCEL_CALLBACK_ID)(ack=_ack, lazy=[_cancel_lazy])
-        # Report: building the all-employee CSV (a Scan) + the upload run post-ack.
-        app.action(REPORT_ACTION)(ack=_ack, lazy=[_report_lazy])
+
+        # Report submit: validate the choice in the ack phase (closes the modal),
+        # then build the CSV (a Scan for quota) + upload post-ack.
+        def _report_ack(ack, body, view):
+            submit_report_ack(ack, body, view, admin_ids)
+
+        def _report_lazy(body, view, client):
+            with db.connect() as d:
+                submit_report_apply(body, view, d, client, admin_ids)
+
+        app.view(REPORT_CALLBACK_ID)(ack=_report_ack, lazy=[_report_lazy])
 
         # Carry-over submit: write the caps in the ack phase, then recompute every
         # employee's stored carry_in post-ack (a Scan) so the ack stays under 3s.
@@ -268,10 +281,10 @@ def build_app(calendar=None, faas=False):
             with db.connect() as d:
                 submit_cancel(ack, body, view, client, d, get_calendar(), get_sheets())
 
-        @app.action(REPORT_ACTION)
-        def _report(ack, body, client):
+        @app.view(REPORT_CALLBACK_ID)
+        def _report_submit(ack, body, view, client):
             with db.connect() as d:
-                handle_report(ack, body, client, d, admin_ids)
+                submit_report(ack, body, view, d, client, admin_ids)
 
     return app
 

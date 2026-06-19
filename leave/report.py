@@ -1,17 +1,23 @@
-"""All-employee leave usage/quota report rendered to CSV text.
+"""Leave reports rendered to CSV text.
 
-A pure `db -> CSV text` function (no Slack), so it's tested directly. Iterates
-every employee via a Scan on the employees table, skipping the reserved policy
-and board items, and emits one row per employee x leave type with the same
-figures `/dayoff` shows: used this year and remaining balance, plus the
-vacation carry-in.
+Pure `db -> CSV text` functions (no Slack), so they're tested directly:
+- build_report_csv: all-employee quota (one row per employee x leave type),
+  via a Scan on the employees table (reserved policy/board items skipped).
+- build_history_csv: one person's full request history, via a single
+  by_employee GSI query (cheaper than the all-employee scan).
 """
 
 import csv
 import io
+from datetime import date
 
+from boto3.dynamodb.conditions import Key
+
+from leave.balance import request_days
 from leave.blocks import LEAVE_TYPES
 from leave.board import BOARD_KEY
+from leave.db import get_employee
+from leave.holidays import holidays_between
 from leave.policy import POLICY_KEY
 from leave.requests import (
     approved_weekdays_by_type_this_year,
@@ -21,6 +27,17 @@ from leave.requests import (
 
 RESERVED = {POLICY_KEY, BOARD_KEY}
 HEADER = ["employee", "leave type", "used", "remaining", "carry-in"]
+HISTORY_HEADER = [
+    "employee",
+    "leave type",
+    "start",
+    "end",
+    "half",
+    "status",
+    "working days",
+    "reason",
+    "decline reason",
+]
 
 
 def _all_employees(db):
@@ -55,4 +72,48 @@ def build_report_csv(db, today):
                     carry if leave_type == "vacation" else 0,
                 ]
             )
+    return out.getvalue()
+
+
+def _employee_requests(db, employee_id):
+    items, query_kwargs = [], {}
+    while True:
+        resp = db.requests.query(
+            IndexName=db.by_employee_index,
+            KeyConditionExpression=Key("employee_id").eq(employee_id),
+            **query_kwargs,
+        )
+        items += resp["Items"]
+        if "LastEvaluatedKey" not in resp:
+            return items
+        query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+
+def build_history_csv(db, employee_id):
+    """CSV text: one row per request for this employee (all statuses, all time),
+    oldest first. `working days` is the quota each request consumes (weekday count,
+    holidays excluded; 0.5 for a half-day)."""
+    employee = get_employee(db, employee_id)
+    name = (employee or {}).get("real_name", employee_id)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(HISTORY_HEADER)
+    rows = sorted(_employee_requests(db, employee_id), key=lambda r: r.get("start_date", ""))
+    for r in rows:
+        start = date.fromisoformat(r["start_date"])
+        end = date.fromisoformat(r["end_date"])
+        days = request_days(start, end, r.get("half"), holidays_between(db, start, end))
+        writer.writerow(
+            [
+                name,
+                r["leave_type"],
+                r["start_date"],
+                r["end_date"],
+                r.get("half") or "",
+                r["status"],
+                days,
+                r.get("reason") or "",
+                r.get("decline_reason") or "",
+            ]
+        )
     return out.getvalue()
