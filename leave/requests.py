@@ -352,9 +352,18 @@ def clear_all_requests(db, calendar, sheets, today):
     approved request's calendar event, the request rows themselves, and the saved
     board. Employees, the central-policy item, holidays, and stored carry_in live
     elsewhere and are untouched. Shared by /control Clear and clear_requests.py.
-    Calendar deletes are best-effort (an event already gone must not abort the
-    wipe). Returns the number of request rows deleted."""
+    Returns the number of request rows deleted.
+
+    Order matters: the database wipe + board reset (the source of truth) run
+    FIRST, then the calendar cleanup. Calendar deletes are one slow HTTP call per
+    event and best-effort (an event already gone must not matter); doing them last
+    means a slow or timing-out calendar can never strand the database half-cleared
+    — which on Lambda would leave the rows behind while the events were removed."""
     items = _scan_all_requests(db)
+    with db.requests.batch_writer() as bw:
+        for it in items:
+            bw.delete_item(Key={"request_id": it["request_id"]})
+    reset_board(db, sheets, today)
     for it in items:
         event_id = it.get("calendar_event_id")
         if event_id:
@@ -362,8 +371,4 @@ def clear_all_requests(db, calendar, sheets, today):
                 calendar.delete_event(event_id)
             except Exception:
                 logger.exception("calendar event %s delete failed during clear", event_id)
-    with db.requests.batch_writer() as bw:
-        for it in items:
-            bw.delete_item(Key={"request_id": it["request_id"]})
-    reset_board(db, sheets, today)
     return len(items)

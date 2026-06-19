@@ -35,6 +35,7 @@ from leave.report import build_report_csv
 from leave.policy import POLICY_KEY, get_policy, set_policy
 from leave.requests import (
     approve_request,
+    clear_all_requests,
     create_request,
     get_request,
     recompute_all_carry_in,
@@ -518,6 +519,28 @@ def test_clear_non_admin_is_rejected(db):
     assert ack.called
     assert get_request(db, rid) is not None
     assert cal.deleted == []
+
+
+def test_clear_wipes_db_before_touching_calendar(db):
+    # A slow/failing calendar must never strand the DB wipe (the Lambda-timeout
+    # failure mode), so the rows must be gone before any calendar call happens.
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    r1 = _seed_approved_with_event(db, "U_A", "evt1")
+    r2 = _seed_approved_with_event(db, "U_A", "evt2")
+
+    rows_remaining_when_calendar_called = []
+
+    class OrderProbeCalendar:
+        def delete_event(self, event_id):
+            rows_remaining_when_calendar_called.append(len(db.requests.scan()["Items"]))
+
+    clear_all_requests(db, OrderProbeCalendar(), FakeSheets(), TODAY)
+
+    # Every calendar call saw an already-empty requests table.
+    assert rows_remaining_when_calendar_called == [0, 0]
+    assert get_request(db, r1) is None and get_request(db, r2) is None
+    assert get_board(db) is None
 
 
 def test_clear_requests_script_delegates_to_shared_function():
