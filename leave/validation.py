@@ -23,6 +23,13 @@ def validate_request(db, employee, leave_type, start, end, today, half=None):
         errors["start_date"] = "Start date can't be in the past."
 
     requested = request_days(start, end, half, holidays_between(db, start, end))
+    if requested == 0:
+        # All the requested dates are weekends/holidays, which don't consume leave —
+        # so the request is meaningless (it would auto-approve for 0 days). Reject it
+        # rather than create an empty approved leave + calendar event.
+        errors["start_date"] = "That range has no working days — weekends and holidays don't use leave."
+        return errors
+
     remaining = remaining_balance(db, employee, leave_type, today)
     if requested > remaining:
         errors["leave_type"] = (
