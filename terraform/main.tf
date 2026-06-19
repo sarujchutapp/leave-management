@@ -111,8 +111,10 @@ data "aws_iam_policy_document" "lambda" {
     resources = [aws_dynamodb_table.employees.arn]
   }
 
-  # Cancelling a request is an UpdateItem. Scan + DeleteItem are for the /control
-  # Clear wipe (#33), which scans every request and batch-deletes the rows.
+  # Cancelling a request is an UpdateItem. Scan + BatchWriteItem are for the /control
+  # Clear wipe (#33): it scans every request and deletes the rows via boto3's
+  # batch_writer, which calls the BatchWriteItem API (NOT DeleteItem — that only
+  # covers single-item delete_item). DeleteItem is kept for any single-row delete.
   statement {
     sid = "RequestsReadWrite"
     actions = [
@@ -122,6 +124,7 @@ data "aws_iam_policy_document" "lambda" {
       "dynamodb:Query",
       "dynamodb:Scan",
       "dynamodb:DeleteItem",
+      "dynamodb:BatchWriteItem",
     ]
     resources = [
       aws_dynamodb_table.requests.arn,
