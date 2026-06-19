@@ -146,9 +146,9 @@ def build_app(calendar=None, faas=False):
     # Leave-limits submit is validate + a single PutItem (fast, well under 3s), so
     # it runs synchronously in both run modes rather than as a lazy listener.
     @app.view(LEAVE_LIMITS_CALLBACK_ID)
-    def _leave_limits_submit(ack, body, view):
+    def _leave_limits_submit(ack, body, view, client):
         with db.connect() as d:
-            submit_leave_limits(ack, body, view, d, admin_ids)
+            submit_leave_limits(ack, body, view, client, d, admin_ids)
 
     @app.action(CARRY_OVER_ACTION)
     def _carry_over(ack, body, client):
@@ -166,9 +166,9 @@ def build_app(calendar=None, faas=False):
     # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
     # fast, so it runs synchronously in both run modes.
     @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
-    def _manage_employees_submit(ack, body, view):
+    def _manage_employees_submit(ack, body, view, client):
         with db.connect() as d:
-            submit_manage_employees(ack, body, view, d, admin_ids)
+            submit_manage_employees(ack, body, view, client, d, admin_ids)
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):
@@ -220,9 +220,9 @@ def build_app(calendar=None, faas=False):
             with db.connect() as d:
                 submit_carry_over_ack(ack, body, view, d, admin_ids)
 
-        def _carry_over_lazy(body, view):
+        def _carry_over_lazy(body, view, client):
             with db.connect() as d:
-                submit_carry_over_apply(body, view, d, admin_ids)
+                submit_carry_over_apply(body, view, d, client, admin_ids)
 
         app.view(CARRY_OVER_CALLBACK_ID)(ack=_carry_over_ack, lazy=[_carry_over_lazy])
 
@@ -231,9 +231,9 @@ def build_app(calendar=None, faas=False):
         def _clear_ack(ack, body, view):
             submit_clear_ack(ack, body, view, admin_ids)
 
-        def _clear_lazy(body, view):
+        def _clear_lazy(body, view, client):
             with db.connect() as d:
-                submit_clear_apply(body, view, d, get_calendar(), get_sheets(), admin_ids)
+                submit_clear_apply(body, view, d, get_calendar(), get_sheets(), client, admin_ids)
 
         app.view(CLEAR_CALLBACK_ID)(ack=_clear_ack, lazy=[_clear_lazy])
     else:
@@ -244,14 +244,14 @@ def build_app(calendar=None, faas=False):
                 submit_leave(ack, body, view, client, d, get_calendar(), get_sheets())
 
         @app.view(CARRY_OVER_CALLBACK_ID)
-        def _carry_over_submit(ack, body, view):
+        def _carry_over_submit(ack, body, view, client):
             with db.connect() as d:
-                submit_carry_over(ack, body, view, d, admin_ids)
+                submit_carry_over(ack, body, view, client, d, admin_ids)
 
         @app.view(CLEAR_CALLBACK_ID)
-        def _clear_submit(ack, body, view):
+        def _clear_submit(ack, body, view, client):
             with db.connect() as d:
-                submit_clear(ack, body, view, d, get_calendar(), get_sheets(), admin_ids)
+                submit_clear(ack, body, view, d, get_calendar(), get_sheets(), client, admin_ids)
 
         @app.action(APPROVE_ACTION)
         def _approve(ack, body, client):

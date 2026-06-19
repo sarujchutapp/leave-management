@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
-from leave.board import reset_board
+from leave.board import BOARD_KEY, reset_board
 from leave.holidays import holidays_between, holidays_for_year
 from leave.policy import POLICY_KEY, allowance_for, get_policy
 
@@ -124,16 +124,18 @@ def recompute_all_carry_in(db, year):
     """Rebuild every employee's stored `year` carry_in from their stored chain under
     the current policy caps — run after the carry-over caps change so persisted
     carry_in (which `max_carry_over` feeds) isn't left stale. Iterates the whole
-    employees table via Scan; the reserved central-policy item is skipped."""
-    scan_kwargs = {}
+    employees table via Scan; the reserved policy/board items are skipped. Returns
+    the number of employees recomputed."""
+    count, scan_kwargs = 0, {}
     while True:
         resp = db.employees.scan(**scan_kwargs)
         for item in resp["Items"]:
-            if item["slack_user_id"] == POLICY_KEY:
+            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY):
                 continue
             recompute_carry_in(db, item, year)
+            count += 1
         if "LastEvaluatedKey" not in resp:
-            return
+            return count
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
@@ -352,9 +354,18 @@ def clear_all_requests(db, calendar, sheets, today):
     approved request's calendar event, the request rows themselves, and the saved
     board. Employees, the central-policy item, holidays, and stored carry_in live
     elsewhere and are untouched. Shared by /control Clear and clear_requests.py.
-    Calendar deletes are best-effort (an event already gone must not abort the
-    wipe). Returns the number of request rows deleted."""
+    Returns the number of request rows deleted.
+
+    Order matters: the database wipe + board reset (the source of truth) run
+    FIRST, then the calendar cleanup. Calendar deletes are one slow HTTP call per
+    event and best-effort (an event already gone must not matter); doing them last
+    means a slow or timing-out calendar can never strand the database half-cleared
+    — which on Lambda would leave the rows behind while the events were removed."""
     items = _scan_all_requests(db)
+    with db.requests.batch_writer() as bw:
+        for it in items:
+            bw.delete_item(Key={"request_id": it["request_id"]})
+    reset_board(db, sheets, today)
     for it in items:
         event_id = it.get("calendar_event_id")
         if event_id:
@@ -362,8 +373,4 @@ def clear_all_requests(db, calendar, sheets, today):
                 calendar.delete_event(event_id)
             except Exception:
                 logger.exception("calendar event %s delete failed during clear", event_id)
-    with db.requests.batch_writer() as bw:
-        for it in items:
-            bw.delete_item(Key={"request_id": it["request_id"]})
-    reset_board(db, sheets, today)
     return len(items)
