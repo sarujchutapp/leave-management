@@ -81,7 +81,7 @@ Then the per-deploy steps:
    - **Socket Mode** → toggle **off** (do this first — the URL fields stay greyed out otherwise).
    - **Interactivity & Shortcuts** → set the **Request URL** to the Function URL (carries modal
      submits + the approve/decline buttons).
-   - **Slash Commands** → set the **Request URL** on both `/dayoff` and `/dayoff-cancel`.
+   - **Slash Commands** → set the **Request URL** on `/dayoff`, `/dayoff-cancel`, and `/control`.
    - **Basic Information → App-Level Tokens** → delete the `connections:write` token (HTTP mode uses `SLACK_SIGNING_SECRET`, not the app-level token).
 6. **Verify:** `python smoke_check.py` (PASS on all three), then run `/dayoff` end-to-end
    (submit → manager ticket → approve → calendar event) through the deployed Lambda.
