@@ -91,7 +91,6 @@ class FakeSlackClient:
         self.chat_postMessage_calls = []
         self.views_update_calls = []
         self.chat_update_calls = []
-        self.conversations_open_calls = []
         self.files_upload_v2_calls = []
 
     def views_open(self, **kwargs):
@@ -113,11 +112,6 @@ class FakeSlackClient:
     def views_update(self, **kwargs):
         self.views_update_calls.append(kwargs)
         return {"ok": True}
-
-    def conversations_open(self, **kwargs):
-        self.conversations_open_calls.append(kwargs)
-        # The DM channel id is derived from the user so tests can assert the target.
-        return {"ok": True, "channel": {"id": f"D_{kwargs.get('users')}"}}
 
     def files_upload_v2(self, **kwargs):
         self.files_upload_v2_calls.append(kwargs)

@@ -259,9 +259,12 @@ def handle_report(ack, body, client, db, admin_ids, today=None):
     if not is_admin(user_id, admin_ids):
         return
     csv_text = build_report_csv(db, today)
-    dm = client.conversations_open(users=user_id)
+    # chat:write already lets the bot DM the user (this auto-opens the IM) and the
+    # response carries that DM's channel id — so we upload the file there without the
+    # im:write scope conversations.open would otherwise require.
+    dm = client.chat_postMessage(channel=user_id, text="Here's the latest leave usage report:")
     client.files_upload_v2(
-        channel=dm["channel"]["id"],
+        channel=dm["channel"],
         content=csv_text,
         filename="leave-report.csv",
         title="Leave usage report",

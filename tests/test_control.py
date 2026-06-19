@@ -577,11 +577,14 @@ def test_report_uploads_csv_to_admin_dm(db):
         today=TODAY,
     )
     assert ack.called
+    # The bot DMs the requesting admin via chat:write (no conversations.open / im:write)...
+    assert len(client.chat_postMessage_calls) == 1
+    dm_channel = client.chat_postMessage_calls[0]["channel"]
+    assert dm_channel == "U_ADMIN"
+    # ...and uploads the CSV to that same DM channel, not a shared channel.
     assert len(client.files_upload_v2_calls) == 1
     call = client.files_upload_v2_calls[0]
-    # Uploaded to the admin's DM (opened for that user), not a shared channel.
-    assert call["channel"] == "D_U_ADMIN"
-    assert client.conversations_open_calls[0]["users"] == "U_ADMIN"
+    assert call["channel"] == dm_channel
     assert call["content"].startswith("employee,leave type,used,remaining,carry-in")
     assert "Alice" in call["content"]
 
