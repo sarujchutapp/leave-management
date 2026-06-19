@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
-from leave.board import reset_board
+from leave.board import BOARD_KEY, reset_board
 from leave.holidays import holidays_between, holidays_for_year
 from leave.policy import POLICY_KEY, allowance_for, get_policy
 
@@ -124,16 +124,18 @@ def recompute_all_carry_in(db, year):
     """Rebuild every employee's stored `year` carry_in from their stored chain under
     the current policy caps — run after the carry-over caps change so persisted
     carry_in (which `max_carry_over` feeds) isn't left stale. Iterates the whole
-    employees table via Scan; the reserved central-policy item is skipped."""
-    scan_kwargs = {}
+    employees table via Scan; the reserved policy/board items are skipped. Returns
+    the number of employees recomputed."""
+    count, scan_kwargs = 0, {}
     while True:
         resp = db.employees.scan(**scan_kwargs)
         for item in resp["Items"]:
-            if item["slack_user_id"] == POLICY_KEY:
+            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY):
                 continue
             recompute_carry_in(db, item, year)
+            count += 1
         if "LastEvaluatedKey" not in resp:
-            return
+            return count
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 

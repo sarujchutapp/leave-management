@@ -104,7 +104,7 @@ def _parse_int(raw):
     return n, None
 
 
-def submit_leave_limits(ack, body, view, db, admin_ids):
+def submit_leave_limits(ack, body, view, client, db, admin_ids):
     """Leave limits submit: re-check admin, validate every field, and on success
     write the new allowances + consecutive limit. Reads the current policy to keep
     the carry-over caps (set_policy overwrites the whole item) intact."""
@@ -122,7 +122,7 @@ def submit_leave_limits(ack, body, view, db, admin_ids):
     if errors:
         ack(response_action="errors", errors=errors)
         return
-    ack()
+    ack(response_action="clear")  # close the whole modal stack on success
     policy = get_policy(db)
     set_policy(
         db,
@@ -134,6 +134,12 @@ def submit_leave_limits(ack, body, view, db, admin_ids):
         max_carry_over=policy["max_carry_over"],
         max_total=policy["max_total"],
         consecutive_limit={"vacation": parsed["consecutive_limit"]},
+    )
+    _notify(
+        client,
+        body["user"]["id"],
+        f"✅ Leave limits updated — sick {parsed['sick']}, vacation {parsed['vacation']}, "
+        f"personal {parsed['personal']}, consecutive limit {parsed['consecutive_limit']}.",
     )
 
 
@@ -173,7 +179,7 @@ def submit_carry_over_ack(ack, body, view, db, admin_ids):
     if errors:
         ack(response_action="errors", errors=errors)
         return False
-    ack()
+    ack(response_action="clear")  # close the whole modal stack on success
     policy = get_policy(db)
     set_policy(
         db,
@@ -185,23 +191,29 @@ def submit_carry_over_ack(ack, body, view, db, admin_ids):
     return True
 
 
-def submit_carry_over_apply(body, view, db, admin_ids, today=None):
-    """Post-ack work: rebuild every employee's stored carry_in under the new caps.
-    Re-checks admin + validity because Lambda lazy listeners fire regardless of the
-    ack result; an invalid/non-admin submission is dropped (no recompute)."""
+def submit_carry_over_apply(body, view, db, client, admin_ids, today=None):
+    """Post-ack work: rebuild every employee's stored carry_in under the new caps,
+    then DM the admin the result. Re-checks admin + validity because Lambda lazy
+    listeners fire regardless of the ack result; an invalid/non-admin submission is
+    dropped (no recompute)."""
     today = today or date.today()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     _, errors = _parse_carry_over(view)
     if errors:
         return
-    recompute_all_carry_in(db, today.year)
+    count = recompute_all_carry_in(db, today.year)
+    _notify(
+        client,
+        body["user"]["id"],
+        f"♻️ Carry-over caps saved and carry-in recomputed for {count} employee(s).",
+    )
 
 
-def submit_carry_over(ack, body, view, db, admin_ids, today=None):
+def submit_carry_over(ack, body, view, client, db, admin_ids, today=None):
     """Synchronous submit (Socket Mode / tests): ack-with-validation, then recompute."""
     if submit_carry_over_ack(ack, body, view, db, admin_ids):
-        submit_carry_over_apply(body, view, db, admin_ids, today)
+        submit_carry_over_apply(body, view, db, client, admin_ids, today)
 
 
 def open_clear(ack, body, client, admin_ids):
@@ -229,24 +241,29 @@ def submit_clear_ack(ack, body, view, admin_ids):
             errors={"confirm": f"Type {CLEAR_CONFIRM_WORD} exactly to confirm."},
         )
         return False
-    ack()
+    ack(response_action="clear")  # close the whole modal stack on success
     return True
 
 
-def submit_clear_apply(body, view, db, calendar, sheets, admin_ids, today=None):
-    """Post-ack work: the actual wipe. Re-checks admin + confirmation because Lambda
-    lazy listeners fire regardless of the ack result; an unconfirmed submission is
-    dropped (nothing deleted)."""
+def submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today=None):
+    """Post-ack work: the actual wipe, then DM the admin the result. Re-checks admin +
+    confirmation because Lambda lazy listeners fire regardless of the ack result; an
+    unconfirmed submission is dropped (nothing deleted)."""
     today = today or date.today()
     if not is_admin(body["user"]["id"], admin_ids) or not _clear_confirmed(view):
         return
-    clear_all_requests(db, calendar, sheets, today)
+    count = clear_all_requests(db, calendar, sheets, today)
+    _notify(
+        client,
+        body["user"]["id"],
+        f"🧹 Cleared {count} leave request(s), removed their calendar events, and reset the board.",
+    )
 
 
-def submit_clear(ack, body, view, db, calendar, sheets, admin_ids, today=None):
+def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today=None):
     """Synchronous submit (Socket Mode / tests): ack-with-confirmation, then wipe."""
     if submit_clear_ack(ack, body, view, admin_ids):
-        submit_clear_apply(body, view, db, calendar, sheets, admin_ids, today)
+        submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today)
 
 
 def handle_report(ack, body, client, db, admin_ids, today=None):
@@ -302,7 +319,7 @@ def _parse_overrides(values):
     return (parsed or None), errors
 
 
-def submit_manage_employees(ack, body, view, db, admin_ids):
+def submit_manage_employees(ack, body, view, client, db, admin_ids):
     """Add/edit (upsert) or delete an employee. Delete is block-and-tell: if the
     target still manages anyone, the submit is rejected naming those reports and
     nothing is deleted — no automatic re-parenting."""
@@ -324,8 +341,9 @@ def submit_manage_employees(ack, body, view, db, admin_ids):
                 },
             )
             return
-        ack()
+        ack(response_action="clear")  # close the whole modal stack on success
         delete_employee(db, target)
+        _notify(client, body["user"]["id"], f"🗑️ Removed <@{target}> from the leave system.")
         return
 
     name = (_value(values, "name").get("value") or "").strip()
@@ -335,9 +353,10 @@ def submit_manage_employees(ack, body, view, db, admin_ids):
     if errors:
         ack(response_action="errors", errors=errors)
         return
-    ack()
+    ack(response_action="clear")  # close the whole modal stack on success
     manager = _value(values, "manager").get("selected_user")
     upsert_employee(db, target, name, manager, allowances=overrides)
+    _notify(client, body["user"]["id"], f"✅ Saved {name} (<@{target}>).")
 
 
 def open_leave_modal(ack, body, client, db, today=None):

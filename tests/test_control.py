@@ -237,15 +237,18 @@ def test_leave_limits_modal_prefilled_with_current_policy(db):
 
 def test_leave_limits_submit_updates_policy(db):
     set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
+    client = FakeSlackClient()
     ack = FakeAck()
     submit_leave_limits(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_leave_limits_view(28, 15, 7, 20),
+        client=client,
         db=db,
         admin_ids=ADMINS,
     )
-    assert ack.called and ack.response is None
+    assert ack.response == {"response_action": "clear"}  # modal closes on success
+    assert len(client.chat_postMessage_calls) == 1  # admin gets a confirmation DM
     p = get_policy(db)
     assert p["allowances"] == {"sick": 28, "vacation": 15, "personal": 7}
     assert p["consecutive_limit"]["vacation"] == 20
@@ -258,6 +261,7 @@ def test_leave_limits_change_flows_live_into_balances(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_leave_limits_view(30, 18, 5, 15),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -277,6 +281,7 @@ def test_leave_limits_preserves_carry_over_caps(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_leave_limits_view(30, 11, 5, 15),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -293,6 +298,7 @@ def test_leave_limits_invalid_input_writes_nothing(db):
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_leave_limits_view("abc", -3, 5, 15),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -309,6 +315,7 @@ def test_leave_limits_non_admin_submit_rejected(db):
         ack=ack,
         body={"user": {"id": "U_OTHER"}},
         view=_leave_limits_view(1, 1, 1, 1),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -345,16 +352,19 @@ def test_carry_over_submit_updates_policy_preserving_allowances(db):
         max_total={"vacation": 15},
         consecutive_limit={"vacation": 14},
     )
+    client = FakeSlackClient()
     ack = FakeAck()
     submit_carry_over(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_carry_over_view(8, 20),
+        client=client,
         db=db,
         admin_ids=ADMINS,
         today=date(2027, 6, 1),
     )
-    assert ack.called and ack.response is None
+    assert ack.response == {"response_action": "clear"}  # modal closes on success
+    assert len(client.chat_postMessage_calls) == 1  # admin gets a confirmation DM
     p = get_policy(db)
     assert p["max_carry_over"]["vacation"] == 8
     assert p["max_total"]["vacation"] == 20
@@ -379,6 +389,7 @@ def test_carry_over_submit_recomputes_all_carry_in(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_carry_over_view(3, 15),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
         today=date(2027, 6, 1),
@@ -406,6 +417,7 @@ def test_carry_over_invalid_input_writes_nothing(db):
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_carry_over_view("x", -1),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
         today=date(2027, 6, 1),
@@ -422,6 +434,7 @@ def test_carry_over_non_admin_submit_rejected(db):
         ack=ack,
         body={"user": {"id": "U_OTHER"}},
         view=_carry_over_view(1, 1),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
         today=date(2027, 6, 1),
@@ -459,6 +472,7 @@ def test_clear_wrong_word_is_noop(db):
         db=db,
         calendar=cal,
         sheets=sheets,
+        client=FakeSlackClient(),
         admin_ids=ADMINS,
         today=TODAY,
     )
@@ -480,7 +494,7 @@ def test_clear_correct_word_wipes_and_preserves_the_rest(db):
         UpdateExpression="SET entries = :e",
         ExpressionAttributeValues={":e": {}},
     )
-    cal, sheets, ack = FakeCalendar(), FakeSheets(), FakeAck()
+    cal, sheets, client, ack = FakeCalendar(), FakeSheets(), FakeSlackClient(), FakeAck()
     submit_clear(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
@@ -488,10 +502,12 @@ def test_clear_correct_word_wipes_and_preserves_the_rest(db):
         db=db,
         calendar=cal,
         sheets=sheets,
+        client=client,
         admin_ids=ADMINS,
         today=TODAY,
     )
-    assert ack.called and ack.response is None
+    assert ack.response == {"response_action": "clear"}  # modal closes on success
+    assert len(client.chat_postMessage_calls) == 1  # admin gets a confirmation DM
     # Requests gone, their calendar events deleted, board reset.
     assert get_request(db, r1) is None and get_request(db, r2) is None
     assert set(cal.deleted) == {"evt1", "evt2"}
@@ -513,6 +529,7 @@ def test_clear_non_admin_is_rejected(db):
         db=db,
         calendar=cal,
         sheets=sheets,
+        client=FakeSlackClient(),
         admin_ids=ADMINS,
         today=TODAY,
     )
@@ -647,15 +664,18 @@ def test_manage_modal_opens_for_admin(db):
 
 
 def test_manage_add_creates_employee_with_override(db):
+    client = FakeSlackClient()
     ack = FakeAck()
     submit_manage_employees(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_NEW", name="Newbie", manager="U_BOSS", overrides={"vacation": 15}),
+        client=client,
         db=db,
         admin_ids=ADMINS,
     )
-    assert ack.called and ack.response is None
+    assert ack.response == {"response_action": "clear"}  # modal closes on success
+    assert len(client.chat_postMessage_calls) == 1  # admin gets a confirmation DM
     emp = get_employee(db, "U_NEW")
     assert emp["real_name"] == "Newbie"
     assert emp["manager_id"] == "U_BOSS"
@@ -668,6 +688,7 @@ def test_manage_edit_updates_name_and_manager(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_E", name="New Name", manager="U_NEW_MGR"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -689,6 +710,7 @@ def test_manage_edit_preserves_carry_in(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_E", name="Eve Renamed", manager="U_MGR"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -704,6 +726,7 @@ def test_manage_delete_non_manager_succeeds(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_A", action="delete"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -718,6 +741,7 @@ def test_manage_delete_manager_blocked_naming_reports(db):
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_M", action="delete"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -736,6 +760,7 @@ def test_manage_delete_after_reassigning_reports_succeeds(db):
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_R", name="Reportee", manager="U_OTHER"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
@@ -744,10 +769,11 @@ def test_manage_delete_after_reassigning_reports_succeeds(db):
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
         view=_manage_view("U_M", action="delete"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
-    assert ack.response is None
+    assert ack.response == {"response_action": "clear"}
     assert get_employee(db, "U_M") is None
 
 
@@ -756,6 +782,7 @@ def test_manage_non_admin_submit_rejected(db):
         ack=FakeAck(),
         body={"user": {"id": "U_OTHER"}},
         view=_manage_view("U_NEW", name="X"),
+        client=FakeSlackClient(),
         db=db,
         admin_ids=ADMINS,
     )
