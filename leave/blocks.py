@@ -19,6 +19,9 @@ CLEAR_CALLBACK_ID = "control_clear_submit"
 CLEAR_CONFIRM_WORD = "CLEAR"
 MANAGE_EMPLOYEES_CALLBACK_ID = "control_manage_employees_submit"
 REPORT_CALLBACK_ID = "control_report_submit"
+# The report-type select dispatches a block action (so the modal can reveal the
+# person picker for "history"); it needs its own action_id to route that event.
+REPORT_TYPE_ACTION = "report_type_select"
 VIEW_SETTINGS_ACTION = "control_view_settings"
 LEAVE_LIMITS_ACTION = "control_leave_limits"
 CARRY_OVER_ACTION = "control_carry_over"
@@ -413,49 +416,50 @@ def build_manage_employees_modal():
     }
 
 
-def build_report_modal():
+def build_report_modal(report_type="quota"):
     """Pick which report to send: all-employee quota, or one person's full leave
-    history. The person picker is used only for the history choice (validated on
-    submit). The CSV is DMed to the requesting admin."""
+    history. The person picker is only shown once "history" is chosen — the
+    report-type select dispatches a block action that re-renders this modal with
+    `report_type` flipped. The CSV is DMed to the requesting admin."""
+    options = [
+        {"text": {"type": "plain_text", "text": "All-employee quota"}, "value": "quota"},
+        {"text": {"type": "plain_text", "text": "One person's leave history"}, "value": "history"},
+    ]
+    initial = options[1] if report_type == "history" else options[0]
+    blocks = [
+        {
+            "type": "input",
+            "block_id": "report_type",
+            "dispatch_action": True,  # fire a block action on selection, to toggle the picker
+            "label": {"type": "plain_text", "text": "Report"},
+            "element": {
+                "type": "static_select",
+                "action_id": REPORT_TYPE_ACTION,
+                "initial_option": initial,
+                "options": options,
+            },
+        },
+    ]
+    if report_type == "history":
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": "person",
+                "label": {"type": "plain_text", "text": "Person"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
+                },
+            }
+        )
     return {
         "type": "modal",
         "callback_id": REPORT_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Report"},
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            {
-                "type": "input",
-                "block_id": "report_type",
-                "label": {"type": "plain_text", "text": "Report"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "value",
-                    "initial_option": {
-                        "text": {"type": "plain_text", "text": "All-employee quota"},
-                        "value": "quota",
-                    },
-                    "options": [
-                        {"text": {"type": "plain_text", "text": "All-employee quota"}, "value": "quota"},
-                        {
-                            "text": {"type": "plain_text", "text": "One person's leave history"},
-                            "value": "history",
-                        },
-                    ],
-                },
-            },
-            {
-                "type": "input",
-                "block_id": "person",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Person (for history)"},
-                "element": {
-                    "type": "users_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
-                },
-            },
-        ],
+        "blocks": blocks,
     }
 
 

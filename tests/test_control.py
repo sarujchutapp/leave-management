@@ -11,6 +11,7 @@ from leave.blocks import (
     MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
     REPORT_CALLBACK_ID,
+    REPORT_TYPE_ACTION,
     SETTINGS_VIEW_CALLBACK_ID,
     VIEW_SETTINGS_ACTION,
 )
@@ -31,6 +32,7 @@ from leave.handlers import (
     submit_leave_limits,
     submit_manage_employees,
     submit_report,
+    update_report_modal,
 )
 from leave.holidays import holidays_for_year, upsert_holiday
 from leave.report import build_history_csv, build_report_csv
@@ -628,20 +630,49 @@ def _report_view(report_type, person=None):
     return {
         "state": {
             "values": {
-                "report_type": {"value": {"selected_option": {"value": report_type}}},
+                "report_type": {REPORT_TYPE_ACTION: {"selected_option": {"value": report_type}}},
                 "person": {"value": {"selected_user": person}},
             }
         }
     }
 
 
-def test_report_modal_opens_for_admin(db):
+def _block_ids(view):
+    return {b.get("block_id") for b in view["blocks"]}
+
+
+def test_report_modal_opens_with_picker_hidden(db):
     client = FakeSlackClient()
     ack = FakeAck()
     open_report(ack=ack, body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
     view = client.views_push_calls[0]["view"]
     assert view["callback_id"] == REPORT_CALLBACK_ID
-    assert any(b.get("block_id") == "report_type" for b in view["blocks"])
+    ids = _block_ids(view)
+    assert "report_type" in ids
+    assert "person" not in ids  # picker hidden until "history" is chosen
+
+
+def test_report_modal_reveals_and_hides_person_picker(db):
+    client = FakeSlackClient()
+    # Selecting "history" updates the modal in place to show the person picker.
+    update_report_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "history"}}]},
+        client=client,
+        admin_ids=ADMINS,
+    )
+    assert client.views_update_calls[0]["view_id"] == "V1"
+    assert "person" in _block_ids(client.views_update_calls[0]["view"])
+    # Switching back to "quota" hides it again.
+    update_report_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "quota"}}]},
+        client=client,
+        admin_ids=ADMINS,
+    )
+    assert "person" not in _block_ids(client.views_update_calls[1]["view"])
 
 
 def test_report_quota_dms_all_employee_csv(db):

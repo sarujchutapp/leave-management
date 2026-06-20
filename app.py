@@ -32,6 +32,7 @@ from leave.blocks import (
     MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
     REPORT_CALLBACK_ID,
+    REPORT_TYPE_ACTION,
     VIEW_SETTINGS_ACTION,
 )
 from leave.handlers import (
@@ -47,6 +48,7 @@ from leave.handlers import (
     open_manage_employees,
     open_report,
     open_view_settings,
+    update_report_modal,
     submit_cancel,
     submit_carry_over,
     submit_carry_over_ack,
@@ -170,6 +172,10 @@ def build_app(calendar=None, faas=False):
     @app.action(REPORT_ACTION)
     def _report(ack, body, client):
         open_report(ack, body, client, admin_ids)
+
+    @app.action(REPORT_TYPE_ACTION)
+    def _report_type_changed(ack, body, client):
+        update_report_modal(ack, body, client, admin_ids)
 
     # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
     # fast, so it runs synchronously in both run modes.

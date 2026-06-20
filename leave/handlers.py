@@ -9,6 +9,7 @@ from datetime import date
 
 from leave.blocks import (
     CLEAR_CONFIRM_WORD,
+    REPORT_TYPE_ACTION,
     build_cancel_modal,
     build_carry_over_modal,
     build_clear_modal,
@@ -268,16 +269,27 @@ def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today
 
 
 def open_report(ack, body, client, admin_ids):
-    """Report button: re-checks admin, then pushes the report-type modal."""
+    """Report button: re-checks admin, then pushes the report-type modal (quota by
+    default — the person picker only appears once 'history' is selected)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     client.views_push(trigger_id=body["trigger_id"], view=build_report_modal())
 
 
+def update_report_modal(ack, body, client, admin_ids):
+    """Report-type select changed: re-render the modal so the person picker shows
+    only for 'history'. Updates in place by view_id (no new modal)."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    report_type = body["actions"][0]["selected_option"]["value"]
+    client.views_update(view_id=body["view"]["id"], view=build_report_modal(report_type))
+
+
 def _report_choice(view):
     values = view["state"]["values"]
-    report_type = values["report_type"]["value"]["selected_option"]["value"]
+    report_type = values["report_type"][REPORT_TYPE_ACTION]["selected_option"]["value"]
     person = values.get("person", {}).get("value", {}).get("selected_user")
     return report_type, person
 
