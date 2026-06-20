@@ -29,3 +29,10 @@ The **Report** action: an admin gets a downloadable CSV of every employee's leav
 ## Blocked by
 
 - V3 #1: /control skeleton (#30)
+
+## As-built amendments (post-merge)
+
+- **Report became a choice, not a single CSV.** The Report button opens a modal to pick the report type: **all-employee quota** (this issue's CSV) or **one person's leave history**. The person picker is shown only after "history" is selected (Slack `dispatch_action` on the select → `views_update` re-renders the modal in place).
+- **New history report**: `build_history_csv` — one `by_employee` query (no Scan). Columns: employee, leave type, start, end, half, status, working days, reason, decline reason; all statuses, oldest first.
+- **Delivery uses `chat:write` only**: the CSV is DMed by posting a message (reusing the returned DM channel) then `files_upload_v2` — no `im:write` scope needed; `files:write` is still required.
+- **Submit closes the modal** (`response_action="clear"`); generation + upload still run post-ack.

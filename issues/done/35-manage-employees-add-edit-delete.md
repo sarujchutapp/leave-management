@@ -30,3 +30,8 @@ The **Manage employees** sub-modal: an admin adds, edits, and removes employees 
 ## Blocked by
 
 - V3 #1: /control skeleton (#30)
+
+## As-built amendments (post-merge)
+
+- **Edit preserves `carry_in`.** `upsert_employee` changed from `put_item` (full-row replace) to a field-level `update_item`, because re-saving an existing employee via `put_item` silently wiped their stored vacation `carry_in`. Add/onboard is unaffected (no carry_in yet); an omitted allowance override is now left unchanged rather than cleared.
+- **Submit feedback**: on success the modal closes (`response_action="clear"`) and the admin gets a DM — "✅ Saved &lt;name&gt;" for add/edit, "🗑️ Removed &lt;name&gt;" for delete.
