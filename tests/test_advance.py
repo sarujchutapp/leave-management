@@ -3,7 +3,7 @@ math is covered directly in test_optimizer.py; here we test the gather + reply."
 
 from datetime import date
 
-from leave.handlers import ADVANCE_NOTHING, CONTACT_ADMIN, _suggest_longest_break, open_advance
+from leave.handlers import ADVANCE_NOTHING, CONTACT_ADMIN, _suggest_breaks, open_advance
 from leave.seed import upsert_employee
 from leave.validation import validate_request
 from leave.db import get_employee
@@ -42,12 +42,20 @@ def test_no_balance_gets_nothing_to_suggest(db):
     assert ack.response == ADVANCE_NOTHING
 
 
-def test_suggested_break_passes_validation(db):
-    # The whole point of sourcing inputs from the request flow: the break is
-    # always bookable. Take the suggestion and run it through validate_request.
+def test_caller_with_balance_gets_multiple_distinct_options(db):
+    # Up to three numbered options, longest-first.
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    ack = FakeAck()
+    open_advance(ack=ack, body={"user_id": "U_A"}, db=db, today=TODAY)
+    assert "*1.*" in ack.response and "*2.*" in ack.response
+
+
+def test_every_suggested_break_passes_validation(db):
+    # The whole point of sourcing inputs from the request flow: every break is
+    # bookable. Run each suggestion through validate_request.
     upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
     emp = get_employee(db, "U_A")
-    brk = _suggest_longest_break(db, emp, TODAY)
-    assert brk is not None
-    errors = validate_request(db, emp, "vacation", brk.book_start, brk.book_end, TODAY)
-    assert errors == {}
+    breaks = _suggest_breaks(db, emp, TODAY)
+    assert breaks
+    for brk in breaks:
+        assert validate_request(db, emp, "vacation", brk.book_start, brk.book_end, TODAY) == {}
