@@ -4,9 +4,42 @@ date arithmetic below relies on."""
 
 from datetime import date
 
-from leave.optimizer import longest_break
+from leave.optimizer import longest_break, top_breaks
 
 YEAR_END = date(2026, 12, 31)
+
+
+def _overlap_days(a, b):
+    lo, hi = max(a.span_start, b.span_start), min(a.span_end, b.span_end)
+    return max(0, (hi - lo).days + 1)
+
+
+def test_top_breaks_returns_up_to_three_distinct_options_longest_first():
+    # Uniform weeks: every Mon-Fri week is a 9-day span for 5 vacation days. The
+    # top three are the three earliest weeks — adjacent weeks share only their
+    # boundary weekend (2 days overlap), so they stay distinct.
+    breaks = top_breaks(date(2026, 6, 1), YEAR_END, 5, set(), [], 9)
+    assert len(breaks) == 3
+    assert [b.book_start for b in breaks] == [date(2026, 6, 1), date(2026, 6, 8), date(2026, 6, 15)]
+    assert all(b.span_days == 9 for b in breaks)
+
+
+def test_top_breaks_options_never_overlap_more_than_two_days():
+    breaks = top_breaks(date(2026, 6, 1), YEAR_END, 5, set(), [], 9)
+    for i, a in enumerate(breaks):
+        for b in breaks[i + 1:]:
+            assert _overlap_days(a, b) <= 2
+
+
+def test_top_breaks_degrades_to_one_when_only_one_window_fits():
+    # A one-working-day horizon (Dec 31 is a Thursday): a single bookable break.
+    breaks = top_breaks(date(2026, 12, 31), YEAR_END, 10, set(), [], 15)
+    assert len(breaks) == 1
+    assert breaks[0].book_start == date(2026, 12, 31)
+
+
+def test_top_breaks_empty_when_no_balance():
+    assert top_breaks(date(2026, 6, 1), YEAR_END, 0, set(), [], 15) == []
 
 
 def test_bridges_weekends_into_longest_run():

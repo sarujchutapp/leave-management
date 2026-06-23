@@ -2,8 +2,9 @@
 
 The first job is the **longest-break finder**: given the caller's remaining
 vacation balance, the company holiday set, their existing full-day leave, the
-consecutive limit, and the horizon (today .. year_end), find the single longest
-continuous absence they can still book this calendar year.
+consecutive limit, and the horizon (today .. year_end), find the longest
+continuous absences they can still book this calendar year — either the single
+best (`longest_break`) or the top few distinct options (`top_breaks`).
 
 Accounting mirrors `requests.continuous_absence_length`: weekends, holidays and
 existing full-day leave are non-working days that fill a run; a worked day (a
@@ -38,17 +39,13 @@ def _sort_key(brk):
     return (-brk.span_days, brk.cost, brk.book_start)
 
 
-def longest_break(today, year_end, balance, holidays, existing_ranges, cap):
-    """The single longest continuous absence the caller can still book in
-    [today, year_end], or None if nothing is bookable.
-
-    `balance` is remaining vacation in working days; `holidays` a set of dates;
-    `existing_ranges` the caller's (start, end) full-day leave; `cap` the
-    consecutive-day limit. The booking never overlaps existing leave, never
-    spends a working day past `year_end`, and yields a span within `cap` (so it
-    always passes `validate_request`)."""
+def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap):
+    """Every bookable break in [today, year_end]: a working-day-bounded booking
+    that doesn't overlap existing leave, costs at most `balance`, spends no
+    working day past `year_end`, and yields a continuous-absence span within
+    `cap` (so each always passes `validate_request`)."""
     if balance <= 0:
-        return None
+        return []
 
     def worked(d, b_start, b_end):
         # Like _is_working, but the proposed booking also makes a day non-working.
@@ -59,7 +56,7 @@ def longest_break(today, year_end, balance, holidays, existing_ranges, cap):
     def overlaps_existing(b_start, b_end):
         return any(s <= b_end and e >= b_start for s, e in existing_ranges)
 
-    best = None
+    candidates = []
     b_start = today
     while b_start <= year_end:
         # Start on a working day: a leading weekend/holiday is already non-working,
@@ -89,10 +86,41 @@ def longest_break(today, year_end, balance, holidays, existing_ranges, cap):
                     span_end += _ONE
                 span_days = (span_end - span_start).days + 1
                 if span_days <= cap:
-                    cand = LeaveBreak(b_start, b_end, cost, span_start, span_end, span_days)
-                    if best is None or _sort_key(cand) < _sort_key(best):
-                        best = cand
+                    candidates.append(
+                        LeaveBreak(b_start, b_end, cost, span_start, span_end, span_days)
+                    )
             b_end += _ONE
         b_start += _ONE
 
-    return best
+    return candidates
+
+
+def _span_overlap_days(a, b):
+    """Calendar days the two breaks' days-off spans share (0 if disjoint)."""
+    lo, hi = max(a.span_start, b.span_start), min(a.span_end, b.span_end)
+    return max(0, (hi - lo).days + 1)
+
+
+def top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=3):
+    """Up to `limit` distinct break options, longest-first (then least quota,
+    then earliest). Two options that share more than 2 days of their days-off
+    span are framings of the same break, so the better-ranked one is kept and the
+    other dropped; a 1-2 day overlap (e.g. a shared boundary weekend) is allowed.
+    Degrades to fewer (or none) when fewer distinct breaks exist."""
+    ranked = sorted(
+        _all_candidates(today, year_end, balance, holidays, existing_ranges, cap), key=_sort_key
+    )
+    chosen = []
+    for cand in ranked:
+        if all(_span_overlap_days(cand, c) <= 2 for c in chosen):
+            chosen.append(cand)
+            if len(chosen) == limit:
+                break
+    return chosen
+
+
+def longest_break(today, year_end, balance, holidays, existing_ranges, cap):
+    """The single longest continuous absence the caller can still book in
+    [today, year_end], or None if nothing is bookable."""
+    best = top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=1)
+    return best[0] if best else None

@@ -32,7 +32,7 @@ from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.seed import delete_employee, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
 from leave.holidays import holidays_for_year
-from leave.optimizer import longest_break
+from leave.optimizer import top_breaks
 from leave.requests import (
     active_full_leave_ranges,
     approve_request,
@@ -453,44 +453,52 @@ def open_leave_modal(ack, body, client, db, today=None):
     client.views_open(trigger_id=body["trigger_id"], view=build_leave_modal(balances))
 
 
-def _suggest_longest_break(db, employee, today):
-    """Gather the optimizer's inputs from the db and return the caller's single
-    longest bookable vacation break this year, or None. Sources balance, holidays,
-    existing full-day leave and the consecutive cap from the same places the
-    request flow uses, so a suggested break always passes validate_request.
-    Holidays span this year and the next so a late-year run can extend into
-    January free days."""
+def _suggest_breaks(db, employee, today):
+    """Gather the optimizer's inputs from the db and return the caller's top
+    distinct bookable vacation breaks this year (longest-first, up to 3). Sources
+    balance, holidays, existing full-day leave and the consecutive cap from the
+    same places the request flow uses, so every suggested break passes
+    validate_request. Holidays span this year and the next so a late-year run can
+    extend into January free days."""
     balance = remaining_balance(db, employee, "vacation", today)
     holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
     existing = active_full_leave_ranges(db, employee["slack_user_id"])
     cap = get_policy(db)["consecutive_limit"]["vacation"]
-    return longest_break(today, date(today.year, 12, 31), balance, holidays, existing, cap)
+    return top_breaks(today, date(today.year, 12, 31), balance, holidays, existing, cap)
 
 
-def _render_break(brk):
+def _render_break_line(index, brk):
     book = brk.book_start.isoformat()
     if brk.book_end != brk.book_start:
         book += f" → {brk.book_end.isoformat()}"
     unit = "day" if brk.cost == 1 else "days"
     return (
-        "🌴 Your longest possible break this year:\n"
-        f"• Book vacation *{book}* ({brk.cost} {unit})\n"
-        f"• → *{brk.span_days} days off* in a row "
-        f"({brk.span_start.isoformat()} → {brk.span_end.isoformat()})"
+        f"*{index}.* Book vacation *{book}* ({brk.cost} {unit}) → "
+        f"*{brk.span_days} days off* ({brk.span_start.isoformat()} → {brk.span_end.isoformat()})"
     )
 
 
+def _render_breaks(breaks):
+    header = (
+        "🌴 Your best break options this year:"
+        if len(breaks) > 1
+        else "🌴 Your longest possible break this year:"
+    )
+    return "\n".join([header] + [_render_break_line(i, b) for i, b in enumerate(breaks, 1)])
+
+
 def open_advance(ack, body, db, today=None):
-    """`/advance`: reply with the single longest vacation break the caller can
-    still take this year, or a clear nothing-to-suggest note. Read-only and fast
-    (no modal, no calendar), so it acks with text in both run modes."""
+    """`/advance`: reply with the caller's top distinct vacation breaks (up to 3,
+    longest-first) they can still take this year, or a clear nothing-to-suggest
+    note. Read-only and fast (no modal, no calendar), so it acks with text in
+    both run modes."""
     today = today or date.today()
     employee = get_employee(db, body["user_id"])
     if employee is None:
         ack(CONTACT_ADMIN)
         return
-    brk = _suggest_longest_break(db, employee, today)
-    ack(_render_break(brk) if brk else ADVANCE_NOTHING)
+    breaks = _suggest_breaks(db, employee, today)
+    ack(_render_breaks(breaks) if breaks else ADVANCE_NOTHING)
 
 
 def _to_gregorian(d):
