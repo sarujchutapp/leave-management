@@ -39,3 +39,29 @@ it is a heads-up the manager weighs. Computed once at submit (static on the tick
 ## Blocked by
 
 None - can start immediately.
+
+---
+
+## As-built (done)
+
+- Pure core `leave/coverage.py` (no DB, no Slack), tested directly in
+  `tests/test_coverage.py`:
+  - `peer_overlap(start, end, peers) -> PeerOverlap | None`. `peers` are
+    (name, start, end, status) tuples; returns the busiest overlapping day
+    (`peak_day`), how many peers are off then (`count`), and the (name, status)
+    `contributors` on that day. Ties on count resolve to the earliest day; None
+    when no peer overlaps the range.
+  - `format_coverage_warning(overlap) -> str`. Renders the ticket line: peak day,
+    count, and each peer by name + status with distinct markers (✅ approved,
+    ⏳ pending). Never receives or shows the leave type.
+- Gather + injection in `leave/handlers.py` (`_coverage_warning`): peers via the
+  existing `list_reports(db, manager_id)` filtered Scan (requester excluded), each
+  peer's pending/approved leave via the new `requests.pending_approved_intervals`.
+  Computed once in `submit_leave_apply` and passed to `build_ticket`.
+- `build_ticket` gains an optional `coverage_warning` param → a heads-up section
+  above the Approve/Decline buttons; the buttons (decision) are untouched.
+
+Decisions: half-day peer leave counts as an overlap (it still reduces coverage).
+Top-of-chain requesters auto-approve and build no ticket, so they never warn; a
+manager whose only report is the requester yields no peers → no warning. The
+warning is static (computed at submit), per the issue.

@@ -30,11 +30,13 @@ from leave.db import get_employee, list_reports
 from leave.policy import get_policy, set_policy
 from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.seed import delete_employee, upsert_employee
+from leave.coverage import format_coverage_warning, peer_overlap
 from leave.holidays import holidays_for_year
 from leave.optimizer import longest_break
 from leave.requests import (
     active_full_leave_ranges,
     approve_request,
+    pending_approved_intervals,
     can_cancel,
     cancel_request,
     cancellable_requests,
@@ -527,6 +529,24 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     set_calendar_event_id(db, request_id, event_id)
 
 
+def _coverage_warning(db, employee, start, end):
+    """Coverage Radar: if any of the requester's peers (employees sharing their
+    manager, the requester excluded) already have pending/approved leave over
+    [start, end], return a heads-up warning string for the ticket; else None.
+    A manager whose only report is the requester yields no peers, so no warning."""
+    peers = []
+    for p in list_reports(db, employee["manager_id"]):
+        if p["slack_user_id"] == employee["slack_user_id"]:
+            continue
+        name = p.get("real_name", p["slack_user_id"])
+        peers += [
+            (name, s, e, status)
+            for s, e, status in pending_approved_intervals(db, p["slack_user_id"])
+        ]
+    overlap = peer_overlap(start, end, peers)
+    return format_coverage_warning(overlap) if overlap else None
+
+
 def submit_leave_ack(ack, body, view, db, today=None):
     """Ack phase (must finish within Slack's 3s): validate and either return inline
     errors or a bare ack. Returns True when the submission is valid. The heavy work
@@ -582,8 +602,17 @@ def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None
         return
 
     remaining = remaining_balance(db, employee, leave_type, today)
+    coverage_warning = _coverage_warning(db, employee, start, end)
     blocks = build_ticket(
-        request_id, employee["real_name"], leave_type, start, end, reason, remaining, half
+        request_id,
+        employee["real_name"],
+        leave_type,
+        start,
+        end,
+        reason,
+        remaining,
+        half,
+        coverage_warning=coverage_warning,
     )
     resp = client.chat_postMessage(
         channel=employee["manager_id"],
