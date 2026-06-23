@@ -2,7 +2,7 @@ from datetime import date
 
 from leave.blocks import LEAVE_CALLBACK_ID, LEAVE_TYPES
 from leave.handlers import CONTACT_ADMIN, open_leave_modal, submit_leave
-from leave.requests import cancellable_requests
+from leave.requests import approve_request, cancellable_requests, create_request
 from leave.seed import upsert_employee
 from tests.fakes import FakeAck, FakeCalendar, FakeSlackClient, make_leave_view
 
@@ -159,6 +159,73 @@ def test_submit_converts_buddhist_era_dates(db):
     assert row["end_date"] == date(2026, 6, 11)
     # the calendar event uses the converted (Gregorian) date too
     assert calendar.created[0]["start"] == date(2026, 6, 10)
+
+
+def _ticket_blocks(client):
+    """Blocks of the approval ticket DM'd to the manager."""
+    return client.chat_postMessage_calls[0].get("blocks", [])
+
+
+def _coverage_text(blocks):
+    """The Coverage Radar warning section text, or None if the ticket has none."""
+    for b in blocks:
+        if b.get("type") == "section" and "Coverage check" in b["text"]["text"]:
+            return b["text"]["text"]
+    return None
+
+
+def _submit_alice_vacation(db, client):
+    view = make_leave_view("vacation", "2026-06-10", "2026-06-11", "trip")
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ALICE"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=FakeCalendar(),
+        today=TODAY,
+    )
+
+
+def test_ticket_warns_when_peer_leave_overlaps(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")
+    upsert_employee(db, "U_BOB", "Bob", "U_BOSS")
+    # Bob (a peer) has approved SICK leave overlapping Alice's requested dates.
+    rid = create_request(db, "U_BOB", "sick", date(2026, 6, 10), date(2026, 6, 12), None)
+    approve_request(db, rid)
+
+    client = FakeSlackClient()
+    _submit_alice_vacation(db, client)
+    blocks = _ticket_blocks(client)
+    text = _coverage_text(blocks)
+    assert text is not None
+    assert "Bob" in text and "approved" in text
+    assert "2026-06-10" in text  # the peak overlapping day
+    assert "sick" not in text  # a peer's leave type is never revealed
+    # The warning is a heads-up only — the Approve/Decline buttons remain.
+    assert any(b.get("block_id") == "ticket_actions" for b in blocks)
+
+
+def test_ticket_has_no_warning_when_no_peer_overlaps(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")
+    upsert_employee(db, "U_BOB", "Bob", "U_BOSS")
+    # Bob is off, but well clear of Alice's dates.
+    rid = create_request(db, "U_BOB", "vacation", date(2026, 6, 22), date(2026, 6, 23), None)
+    approve_request(db, rid)
+
+    client = FakeSlackClient()
+    _submit_alice_vacation(db, client)
+    assert _coverage_text(_ticket_blocks(client)) is None
+
+
+def test_no_warning_when_requester_is_managers_only_report(db):
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS")  # the only report
+    client = FakeSlackClient()
+    _submit_alice_vacation(db, client)
+    assert _coverage_text(_ticket_blocks(client)) is None
 
 
 def test_submit_invalid_acks_errors_and_persists_nothing(db):

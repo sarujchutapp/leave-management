@@ -213,6 +213,17 @@ def active_full_leave_ranges(db, employee_id):
     ]
 
 
+def pending_approved_intervals(db, employee_id):
+    """(start, end, status) for the employee's pending/approved leave, full or
+    half day. Coverage Radar uses these to find peer overlaps (a half-day still
+    reduces coverage, so it counts)."""
+    return [
+        (date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]), r["status"])
+        for r in _by_employee(db, employee_id)
+        if r["status"] in ("pending", "approved")
+    ]
+
+
 def continuous_absence_length(db, employee_id, start, end):
     """Calendar-day length of the unbroken non-working run a [start,end] full-day
     leave would join. Weekends, holidays, and the employee's existing full-day

@@ -130,16 +130,24 @@ def build_leave_modal(balances=None):
     }
 
 
-def build_ticket(request_id, employee_name, leave_type, start, end, reason, remaining, half=None):
-    """Manager's approval ticket: details + Approve/Decline buttons."""
+def build_ticket(
+    request_id, employee_name, leave_type, start, end, reason, remaining, half=None, coverage_warning=None
+):
+    """Manager's approval ticket: details + Approve/Decline buttons. An optional
+    Coverage Radar warning (peers already off over these dates) is shown as a
+    heads-up section above the buttons; it never changes the decision."""
     detail = f"*{employee_name}* requests *{leave_type}* leave\n{format_period(start, end, half)}"
     context = f"Balance left for {leave_type}: {remaining}"
     if reason:
         context += f"\nReason: {reason}"
     rid = str(request_id)
-    return [
+    blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": detail}},
         {"type": "section", "text": {"type": "mrkdwn", "text": context}},
+    ]
+    if coverage_warning:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": coverage_warning}})
+    blocks.append(
         {
             "type": "actions",
             "block_id": "ticket_actions",
@@ -159,8 +167,9 @@ def build_ticket(request_id, employee_name, leave_type, start, end, reason, rema
                     "value": rid,
                 },
             ],
-        },
-    ]
+        }
+    )
+    return blocks
 
 
 def build_decline_modal(private_metadata):
