@@ -76,6 +76,39 @@ group chat" ritual. One authoritative message everyone looks at — not a per-pe
 command. Distinct from the Google Calendar (which remains the write-only event feed).
 _Avoid_: calendar, dashboard, roster
 
+**Leave Optimizer**:
+Deterministic leave suggestions derived from data the system already stores
+(remaining balance, holidays, weekends, existing requests) — plain arithmetic, no
+LLM. Employees reach it through the `/advance` command. Its first job is the
+**longest-break finder**: the longest single continuous absence a person can still
+take in the current calendar year given their remaining vacation, bounded by the
+consecutive limit. A second job, the **group-break finder**, takes a chosen set of
+people and finds the longest window they can *all* be off at once — each within
+their own balance and cap — revealing only the shared window, never anyone's
+balance. Distinct from the proactive year-end nudges and the approval-time
+referees, which fire on their own triggers, not from `/advance`.
+_Avoid_: AI, recommender, planner
+
+**Coverage Radar**:
+A soft heads-up shown to a manager on a leave request's approval ticket when one
+or more of their other direct reports (employees sharing the same manager) already
+have leave — approved *or* still pending — overlapping the requested dates. It
+surfaces overlap a glance at the leave board can miss, since pending requests
+aren't on the board. A warning the manager weighs, never a block. The seed of a
+later enforced capacity cap.
+_Avoid_: conflict checker, blackout, capacity limit
+
+**No-break stretch**:
+How long a person has gone without time off — days since their last *taken*
+(past approved) leave, extended by whether and when they have anything booked
+ahead. The primary measure of **burnout risk**, ranked across the team
+(longest first) with supporting flags (low remaining allowance late in the year,
+a long consecutive working stretch). Surfaced as a **burnout report** the admin
+pulls from `/control`; a future proactive **burnout warning** DMs the at-risk
+person and/or their manager. Explainable by design — every flag says why, never
+an opaque score.
+_Avoid_: burnout score, wellness index
+
 **Max carry over**:
 The cap on how many unused days may roll *out* of a year into the next.
 
