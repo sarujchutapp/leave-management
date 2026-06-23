@@ -28,7 +28,7 @@ from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import get_employee, list_reports
 from leave.policy import get_policy, set_policy
-from leave.report import build_history_csv, build_report_csv
+from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.seed import delete_employee, upsert_employee
 from leave.holidays import holidays_for_year
 from leave.optimizer import longest_break
@@ -342,6 +342,15 @@ def submit_report_apply(body, view, db, client, admin_ids, today=None):
             f"leave-history-{person}.csv",
             f"Leave history — {name}",
             f"Leave history for {name}:",
+        )
+    elif report_type == "burnout":
+        _dm_csv(
+            client,
+            user_id,
+            build_burnout_csv(db, today),
+            "leave-burnout.csv",
+            "Team burnout risk",
+            "Here's the team burnout-risk report (ranked by no-break stretch):",
         )
     else:
         _dm_csv(
