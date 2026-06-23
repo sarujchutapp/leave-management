@@ -43,3 +43,27 @@ multi-option list yet (later slices).
 ## Blocked by
 
 None - can start immediately.
+
+---
+
+## As-built (done)
+
+- Pure core `leave/optimizer.py`: `longest_break(today, year_end, balance, holidays,
+  existing_ranges, cap) -> LeaveBreak | None`. Brute-forces booking ranges
+  `[b_start, b_end]` (working-day endpoints, length bounded by `cap`), counts quota as
+  working days, and measures the resulting continuous absence with the same
+  weekend/holiday/existing-leave accounting as `continuous_absence_length`. Rejects
+  spans over `cap` and bookings that overlap existing leave; `b_end <= year_end` keeps
+  every booked working day in this year (the span may still spill into January via free
+  days). Ranks longest span → least quota → earliest.
+- Gather + render in `leave/handlers.py` (`_suggest_longest_break`, `_render_break`,
+  `open_advance`), reusing `remaining_balance`, `holidays_for_year`,
+  `active_full_leave_ranges`, and the policy consecutive limit — so a suggestion always
+  passes `validate_request` (asserted in `test_advance.py`).
+- `/advance` wired in `app.py` synchronously (read-only, text reply, no modal).
+- Tests: `tests/test_optimizer.py` (bridge selection, cap bound, building around
+  bookings, year boundary, tie-break, no-balance) and `tests/test_advance.py` (seam:
+  unregistered, has-balance, top-of-chain, no-balance, validation round-trip).
+
+Next slices: #40 (top 2–3 distinct options), #41 (Book button / prefilled modal),
+#42 (group-break finder) all build on this `optimizer.py` + `/advance` foundation.

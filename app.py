@@ -39,6 +39,7 @@ from leave.handlers import (
     handle_approve,
     handle_decline_click,
     handle_decline_submit,
+    open_advance,
     open_cancel_modal,
     open_carry_over,
     open_clear,
@@ -129,6 +130,14 @@ def build_app(calendar=None, faas=False):
     def _open_cancel(ack, body, client):
         with db.connect() as d:
             open_cancel_modal(ack, body, client, d)
+
+    # /advance only reads (balance, holidays, leave, policy) and replies with text
+    # in the ack — no modal, no slow calendar/board work — so it runs synchronously
+    # in both run modes, like /control.
+    @app.command("/advance")
+    def _advance(ack, body):
+        with db.connect() as d:
+            open_advance(ack, body, d)
 
     # Admin control plane. The menu open + View Settings only open modals / do a
     # keyed policy read (fast), so they run synchronously in both run modes. The
