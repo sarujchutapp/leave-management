@@ -424,8 +424,9 @@ def build_report_modal(report_type="quota"):
     options = [
         {"text": {"type": "plain_text", "text": "All-employee quota"}, "value": "quota"},
         {"text": {"type": "plain_text", "text": "One person's leave history"}, "value": "history"},
+        {"text": {"type": "plain_text", "text": "Team burnout risk"}, "value": "burnout"},
     ]
-    initial = options[1] if report_type == "history" else options[0]
+    initial = next((o for o in options if o["value"] == report_type), options[0])
     blocks = [
         {
             "type": "input",

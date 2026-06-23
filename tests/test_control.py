@@ -35,7 +35,7 @@ from leave.handlers import (
     update_report_modal,
 )
 from leave.holidays import holidays_for_year, upsert_holiday
-from leave.report import build_history_csv, build_report_csv
+from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.policy import POLICY_KEY, get_policy, set_policy
 from leave.requests import (
     approve_request,
@@ -625,6 +625,41 @@ def test_history_csv_lists_a_persons_requests_oldest_first(db):
     assert rows[2][7] == "trip"  # reason carried through
 
 
+def _approved_past_leave(db, emp_id, start, end):
+    """An approved leave that has already ended (a 'taken' break)."""
+    rid = create_request(db, emp_id, "vacation", start, end, None)
+    approve_request(db, rid)
+    return rid
+
+
+def test_burnout_csv_ranks_by_no_break_stretch_longest_first(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    upsert_employee(db, "U_B", "Bob", None)
+    # Alice last broke in February and has nothing booked — a long dry spell.
+    _approved_past_leave(db, "U_A", date(2026, 2, 2), date(2026, 2, 2))
+    # Bob broke late May — a short stretch.
+    _approved_past_leave(db, "U_B", date(2026, 5, 29), date(2026, 5, 29))
+
+    rows = _csv_rows(build_burnout_csv(db, TODAY))  # TODAY = 2026-06-08
+    assert rows[0] == [
+        "employee", "no-break stretch (days)", "remaining vacation",
+        "days left in year", "longest working stretch (days)",
+    ]
+    names = [r[0] for r in rows[1:]]
+    assert names == ["Alice", "Bob"]  # Alice's longer stretch ranks first
+
+
+def test_burnout_csv_handles_employee_who_never_took_leave(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    rows = _csv_rows(build_burnout_csv(db, TODAY))
+    alice = next(r for r in rows[1:] if r[0] == "Alice")
+    # Stretch measured from the year start, not an error.
+    assert int(alice[1]) == (TODAY - date(2026, 1, 1)).days
+    assert int(alice[2]) == 10  # full vacation remaining (default allowance)
+
+
 def _report_view(report_type, person=None):
     """A view_submission state payload matching build_report_modal."""
     return {
@@ -717,6 +752,35 @@ def test_report_history_dms_that_persons_csv(db):
     # It's the history CSV (history header), and it's about Alice.
     assert call["content"].startswith("employee,leave type,start,end")
     assert "Alice" in call["content"] and "2026-06-10" in call["content"]
+
+
+def test_report_modal_offers_burnout_option(db):
+    client = FakeSlackClient()
+    open_report(ack=FakeAck(), body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
+    view = client.views_push_calls[0]["view"]
+    block = next(b for b in view["blocks"] if b.get("block_id") == "report_type")
+    values = {o["value"] for o in block["element"]["options"]}
+    assert "burnout" in values
+
+
+def test_report_burnout_dms_csv(db):
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    client = FakeSlackClient()
+    ack = FakeAck()
+    submit_report(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_report_view("burnout"),
+        db=db,
+        client=client,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.response == {"response_action": "clear"}  # no person picker needed
+    call = client.files_upload_v2_calls[0]
+    assert call["channel"] == "U_ADMIN"
+    assert call["content"].startswith("employee,no-break stretch")
 
 
 def test_report_history_without_person_is_rejected(db):

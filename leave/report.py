@@ -16,12 +16,14 @@ from boto3.dynamodb.conditions import Key
 from leave.balance import request_days
 from leave.blocks import LEAVE_TYPES
 from leave.board import BOARD_KEY
+from leave.burnout import longest_working_stretch, no_break_stretch
 from leave.db import get_employee
-from leave.holidays import holidays_between
+from leave.holidays import holidays_between, holidays_for_year
 from leave.policy import POLICY_KEY
 from leave.requests import (
     approved_weekdays_by_type_this_year,
     carry_in_for,
+    remaining_balance,
     remaining_balances,
 )
 
@@ -37,6 +39,13 @@ HISTORY_HEADER = [
     "working days",
     "reason",
     "decline reason",
+]
+BURNOUT_HEADER = [
+    "employee",
+    "no-break stretch (days)",
+    "remaining vacation",
+    "days left in year",
+    "longest working stretch (days)",
 ]
 
 
@@ -72,6 +81,54 @@ def build_report_csv(db, today):
                     carry if leave_type == "vacation" else 0,
                 ]
             )
+    return out.getvalue()
+
+
+def _burnout_row(db, emp, today, holidays, year_start, year_end, days_left):
+    """One employee's burnout row: the no-break stretch (rank key) plus the
+    supporting flags. Past *approved* leave that has ended anchors the stretch;
+    the earliest future approved/pending leave closes it. Approved/pending leave
+    are the breaks that reset the longest working stretch."""
+    requests = _employee_requests(db, emp["slack_user_id"])
+    taken_ends = [
+        date.fromisoformat(r["end_date"])
+        for r in requests
+        if r["status"] == "approved" and date.fromisoformat(r["end_date"]) < today
+    ]
+    booked_starts = [
+        date.fromisoformat(r["start_date"])
+        for r in requests
+        if r["status"] in ("approved", "pending") and date.fromisoformat(r["start_date"]) > today
+    ]
+    leave_ranges = [
+        (date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]))
+        for r in requests
+        if r["status"] in ("approved", "pending")
+    ]
+    stretch = no_break_stretch(today, max(taken_ends, default=None), min(booked_starts, default=None))
+    working = longest_working_stretch(year_start, year_end, leave_ranges, holidays)
+    remaining = remaining_balance(db, emp, "vacation", today)
+    return [emp.get("real_name", ""), stretch, remaining, days_left, working]
+
+
+def build_burnout_csv(db, today):
+    """CSV text: one row per employee, ranked by no-break stretch (longest first,
+    name as tie-break). Each row carries the supporting flags — remaining vacation
+    vs days left in the year, and the longest working stretch — so the admin can
+    see why a person ranks where they do. db -> CSV, like the other reports."""
+    year_start = date(today.year, 1, 1)
+    year_end = date(today.year, 12, 31)
+    holidays = holidays_for_year(db, today.year)
+    days_left = (year_end - today).days
+    rows = [
+        _burnout_row(db, emp, today, holidays, year_start, year_end, days_left)
+        for emp in _all_employees(db)
+    ]
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(BURNOUT_HEADER)
+    writer.writerows(rows)
     return out.getvalue()
 
 
