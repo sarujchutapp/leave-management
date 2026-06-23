@@ -30,7 +30,10 @@ from leave.db import get_employee, list_reports
 from leave.policy import get_policy, set_policy
 from leave.report import build_history_csv, build_report_csv
 from leave.seed import delete_employee, upsert_employee
+from leave.holidays import holidays_for_year
+from leave.optimizer import longest_break
 from leave.requests import (
+    active_full_leave_ranges,
     approve_request,
     can_cancel,
     cancel_request,
@@ -52,6 +55,10 @@ NOT_APPROVER = "You're not the approver for this request."
 NOTHING_TO_CANCEL = "You have no requests to cancel."
 CANNOT_CANCEL = "That request can no longer be cancelled."
 NOT_ADMIN = "Sorry, /control is for admins only."
+ADVANCE_NOTHING = (
+    "No vacation break to suggest right now — you may be out of vacation balance, "
+    "or have no open stretch left this year."
+)
 
 
 def is_admin(user_id, admin_ids):
@@ -433,6 +440,46 @@ def open_leave_modal(ack, body, client, db, today=None):
     ack()
     balances = remaining_balances(db, employee, today)
     client.views_open(trigger_id=body["trigger_id"], view=build_leave_modal(balances))
+
+
+def _suggest_longest_break(db, employee, today):
+    """Gather the optimizer's inputs from the db and return the caller's single
+    longest bookable vacation break this year, or None. Sources balance, holidays,
+    existing full-day leave and the consecutive cap from the same places the
+    request flow uses, so a suggested break always passes validate_request.
+    Holidays span this year and the next so a late-year run can extend into
+    January free days."""
+    balance = remaining_balance(db, employee, "vacation", today)
+    holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
+    existing = active_full_leave_ranges(db, employee["slack_user_id"])
+    cap = get_policy(db)["consecutive_limit"]["vacation"]
+    return longest_break(today, date(today.year, 12, 31), balance, holidays, existing, cap)
+
+
+def _render_break(brk):
+    book = brk.book_start.isoformat()
+    if brk.book_end != brk.book_start:
+        book += f" → {brk.book_end.isoformat()}"
+    unit = "day" if brk.cost == 1 else "days"
+    return (
+        "🌴 Your longest possible break this year:\n"
+        f"• Book vacation *{book}* ({brk.cost} {unit})\n"
+        f"• → *{brk.span_days} days off* in a row "
+        f"({brk.span_start.isoformat()} → {brk.span_end.isoformat()})"
+    )
+
+
+def open_advance(ack, body, db, today=None):
+    """`/advance`: reply with the single longest vacation break the caller can
+    still take this year, or a clear nothing-to-suggest note. Read-only and fast
+    (no modal, no calendar), so it acks with text in both run modes."""
+    today = today or date.today()
+    employee = get_employee(db, body["user_id"])
+    if employee is None:
+        ack(CONTACT_ADMIN)
+        return
+    brk = _suggest_longest_break(db, employee, today)
+    ack(_render_break(brk) if brk else ADVANCE_NOTHING)
 
 
 def _to_gregorian(d):
