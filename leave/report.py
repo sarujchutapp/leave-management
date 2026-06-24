@@ -17,10 +17,10 @@ from boto3.dynamodb.conditions import Key
 from leave.balance import request_days
 from leave.blocks import LEAVE_TYPES
 from leave.board import BOARD_KEY
-from leave.burnout import longest_working_stretch, no_break_stretch
+from leave.burnout import expiring_quota, longest_working_stretch, no_break_stretch
 from leave.db import get_employee
 from leave.holidays import HOLIDAYS_KEY, holidays_between, holidays_for_year
-from leave.policy import POLICY_KEY
+from leave.policy import POLICY_KEY, get_policy
 from leave.requests import (
     approved_weekdays_by_type_this_year,
     carry_in_for,
@@ -85,18 +85,20 @@ def build_report_csv(db, today):
     return out.getvalue()
 
 
-# One employee's burnout signals, in the order the BURNOUT_HEADER lists them.
-# Shared by the burnout CSV report and the /burnout board so the two can't drift.
+# One employee's burnout signals. Shared by the burnout CSV report and the
+# /burnout board so the two can't drift. `expiring` is the year-end vacation
+# forfeit (board-only flag); the CSV keeps its original columns (BURNOUT_HEADER).
 BurnoutSignals = namedtuple(
-    "BurnoutSignals", ["name", "stretch", "remaining", "days_left", "working"]
+    "BurnoutSignals", ["name", "stretch", "remaining", "days_left", "working", "expiring"]
 )
 
 
-def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left):
+def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left, max_carry_over):
     """One employee's burnout signals: the no-break stretch (rank key) plus the
     supporting flags. Past *approved* leave that has ended anchors the stretch;
     the earliest future approved/pending leave closes it. Approved/pending leave
-    are the breaks that reset the longest working stretch."""
+    are the breaks that reset the longest working stretch. `expiring` is the
+    vacation that won't carry past year-end under the live policy cap."""
     requests = _employee_requests(db, emp["slack_user_id"])
     taken_ends = [
         date.fromisoformat(r["end_date"])
@@ -116,19 +118,22 @@ def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, day
     stretch = no_break_stretch(today, max(taken_ends, default=None), min(booked_starts, default=None))
     working = longest_working_stretch(year_start, year_end, leave_ranges, holidays)
     remaining = remaining_balance(db, emp, "vacation", today)
-    return BurnoutSignals(emp.get("real_name", ""), stretch, remaining, days_left, working)
+    expiring = expiring_quota(remaining, max_carry_over)
+    return BurnoutSignals(emp.get("real_name", ""), stretch, remaining, days_left, working, expiring)
 
 
 def ranked_burnout_signals(db, employees, today):
     """Each employee's burnout signals, ranked by no-break stretch (longest first,
     name as tie-break). The single computation the burnout CSV report and the
-    /burnout board both call, so the signals they show cannot drift."""
+    /burnout board both call, so the signals they show cannot drift. Reads the
+    live policy carry-over cap once for the expiring-quota flag."""
     year_start = date(today.year, 1, 1)
     year_end = date(today.year, 12, 31)
     holidays = holidays_for_year(db, today.year)
     days_left = (year_end - today).days
+    max_carry_over = get_policy(db)["max_carry_over"]["vacation"]
     signals = [
-        employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left)
+        employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left, max_carry_over)
         for emp in employees
     ]
     signals.sort(key=lambda s: (-s.stretch, s.name))

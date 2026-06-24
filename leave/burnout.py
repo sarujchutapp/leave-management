@@ -20,6 +20,14 @@ def no_break_stretch(today, last_taken_end, next_booked_start):
     return max((end - anchor).days, 0)
 
 
+def expiring_quota(remaining_vacation, max_carry_over):
+    """Vacation days that won't survive year-end: the remaining balance beyond what
+    the policy lets carry over (`max_carry_over`), floored at zero. A person holding
+    no more than the cap loses nothing — the rest carries into next year. Explainable
+    by construction: plain subtraction against the live policy cap."""
+    return max(remaining_vacation - max_carry_over, 0)
+
+
 def longest_working_stretch(start, end, leave_ranges, holidays):
     """The longest run of working days (Mon-Fri, holidays excluded) within
     [start, end] that no leave interrupts. Weekends and holidays span a run

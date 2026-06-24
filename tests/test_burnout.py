@@ -3,7 +3,7 @@ no Slack. 2026-01-01 is a Thursday, which the working-day arithmetic relies on."
 
 from datetime import date
 
-from leave.burnout import longest_working_stretch, no_break_stretch
+from leave.burnout import expiring_quota, longest_working_stretch, no_break_stretch
 
 TODAY = date(2026, 6, 24)  # a Wednesday
 
@@ -25,6 +25,21 @@ def test_never_taken_leave_anchors_at_year_start():
     # Handled sensibly: the stretch opens at the start of the year, not an error.
     stretch = no_break_stretch(TODAY, None, None)
     assert stretch == (TODAY - date(2026, 1, 1)).days
+
+
+def test_expiring_quota_is_remaining_beyond_the_carry_cap():
+    # Holds 12 vacation days, only 5 may carry over: 7 expire at year-end.
+    assert expiring_quota(12, 5) == 7
+
+
+def test_expiring_quota_is_zero_when_within_the_cap():
+    # Holds fewer than the cap: everything carries over, nothing expires.
+    assert expiring_quota(3, 5) == 0
+
+
+def test_expiring_quota_floors_at_the_cap_boundary():
+    # Exactly at the cap: the whole balance carries, so nothing expires.
+    assert expiring_quota(5, 5) == 0
 
 
 def test_working_stretch_spans_weekends_but_resets_on_leave():
