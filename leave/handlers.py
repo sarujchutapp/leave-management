@@ -612,6 +612,13 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     set_calendar_event_id(db, request_id, event_id)
 
 
+def _self_approves(employee):
+    """No separate approver — top of chain. True when the employee has no manager,
+    or is listed as their own manager (which an admin can set via Manage employees).
+    Either way their requests auto-approve rather than routing a ticket to anyone."""
+    return employee["manager_id"] is None or employee["manager_id"] == employee["slack_user_id"]
+
+
 def _coverage_warning(db, employee, start, end):
     """Coverage Radar: if any of the requester's peers (employees sharing their
     manager, the requester excluded) already have pending/approved leave over
@@ -660,8 +667,8 @@ def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None
         db, employee["slack_user_id"], leave_type, start, end, reason, half
     )
 
-    # Top of chain: no manager to approve, so auto-approve.
-    if employee["manager_id"] is None:
+    # Top of chain (no manager, or their own manager): auto-approve.
+    if _self_approves(employee):
         _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half)
         _notify(
             client,
@@ -901,7 +908,7 @@ def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None
     if status_before == "approved" and request["calendar_event_id"]:
         calendar.delete_event(request["calendar_event_id"])
         update_board(db, client, today, sheets, remove_request_id=request_id)
-        if employee["manager_id"]:
+        if not _self_approves(employee):  # only FYI a real, distinct manager
             _notify(
                 client,
                 employee["manager_id"],

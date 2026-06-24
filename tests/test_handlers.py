@@ -116,6 +116,34 @@ def test_submit_auto_approves_when_no_manager(db):
     assert row["calendar_event_id"] == calendar.created[0]["id"]
 
 
+def test_submit_auto_approves_when_employee_is_their_own_manager(db):
+    # An admin may set someone as their own manager — there's no separate approver,
+    # so it must auto-approve, not DM the person a ticket to approve themselves.
+    upsert_employee(db, "U_SOLO", "Solo", "U_SOLO")  # own manager
+    ack = FakeAck()
+    client = FakeSlackClient()
+    calendar = FakeCalendar()
+    view = make_leave_view("vacation", "2026-06-10", "2026-06-11")
+
+    submit_leave(
+        ack=ack,
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=calendar,
+        today=TODAY,
+    )
+
+    row = _persisted(db, "U_SOLO")
+    assert row["status"] == "approved"
+    # self-notify only — no approval ticket (blocks) routed anywhere
+    assert len(client.chat_postMessage_calls) == 1
+    assert client.chat_postMessage_calls[0]["channel"] == "U_SOLO"
+    assert "blocks" not in client.chat_postMessage_calls[0]
+    assert len(calendar.created) == 1
+
+
 def test_submit_single_day_defaults_end_to_start(db):
     # End date is optional; leaving it blank means a one-day leave (end = start).
     upsert_employee(db, "U_SOLO", "Solo", None)
