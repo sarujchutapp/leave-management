@@ -205,11 +205,13 @@ def build_app(calendar=None, faas=False):
 
     @app.action(REPORT_ACTION)
     def _report(ack, body, client):
-        open_report(ack, body, client, admin_ids)
+        with db.connect() as d:
+            open_report(ack, body, client, d, admin_ids)
 
     @app.action(REPORT_TYPE_ACTION)
     def _report_type_changed(ack, body, client):
-        update_report_modal(ack, body, client, admin_ids)
+        with db.connect() as d:
+            update_report_modal(ack, body, client, d, admin_ids)
 
     # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
     # fast, so it runs synchronously in both run modes.
