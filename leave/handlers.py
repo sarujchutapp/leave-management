@@ -10,6 +10,7 @@ from datetime import date
 from leave.blocks import (
     CLEAR_CONFIRM_WORD,
     REPORT_TYPE_ACTION,
+    build_advance_blocks,
     build_cancel_modal,
     build_carry_over_modal,
     build_clear_modal,
@@ -467,38 +468,47 @@ def _suggest_breaks(db, employee, today):
     return top_breaks(today, date(today.year, 12, 31), balance, holidays, existing, cap)
 
 
-def _render_break_line(index, brk):
-    book = brk.book_start.isoformat()
-    if brk.book_end != brk.book_start:
-        book += f" → {brk.book_end.isoformat()}"
-    unit = "day" if brk.cost == 1 else "days"
-    return (
-        f"*{index}.* Book vacation *{book}* ({brk.cost} {unit}) → "
-        f"*{brk.span_days} days off* ({brk.span_start.isoformat()} → {brk.span_end.isoformat()})"
-    )
-
-
-def _render_breaks(breaks):
-    header = (
-        "🌴 Your best break options this year:"
-        if len(breaks) > 1
-        else "🌴 Your longest possible break this year:"
-    )
-    return "\n".join([header] + [_render_break_line(i, b) for i, b in enumerate(breaks, 1)])
-
-
 def open_advance(ack, body, db, today=None):
     """`/advance`: reply with the caller's top distinct vacation breaks (up to 3,
-    longest-first) they can still take this year, or a clear nothing-to-suggest
-    note. Read-only and fast (no modal, no calendar), so it acks with text in
-    both run modes."""
+    longest-first) they can still take this year, each with a Book button — or a
+    clear nothing-to-suggest note. Read-only and fast (no modal, no calendar), so
+    it acks the reply directly in both run modes."""
     today = today or date.today()
     employee = get_employee(db, body["user_id"])
     if employee is None:
         ack(CONTACT_ADMIN)
         return
     breaks = _suggest_breaks(db, employee, today)
-    ack(_render_breaks(breaks) if breaks else ADVANCE_NOTHING)
+    if not breaks:
+        ack(ADVANCE_NOTHING)
+        return
+    ack(
+        {
+            "response_type": "ephemeral",
+            "text": "🌴 Your break options this year",
+            "blocks": build_advance_blocks(breaks),
+        }
+    )
+
+
+def open_book_modal(ack, body, client, db, today=None):
+    """/advance Book button: open the apply modal pre-filled with the chosen
+    break's vacation dates (`start|end` from the button value). No new write path
+    — submitting runs the normal request flow, where validate_request is the
+    safety net for a break gone stale (e.g. balance changed) by submit time."""
+    ack()
+    today = today or date.today()
+    employee = get_employee(db, body["user"]["id"])
+    if employee is None:
+        return
+    start, end = body["actions"][0]["value"].split("|")
+    balances = remaining_balances(db, employee, today)
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=build_leave_modal(
+            balances, prefill={"leave_type": "vacation", "start": start, "end": end}
+        ),
+    )
 
 
 def _to_gregorian(d):

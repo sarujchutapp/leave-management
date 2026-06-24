@@ -1,15 +1,42 @@
-"""Handler-seam tests for /advance (the longest-break tracer). The optimizer
-math is covered directly in test_optimizer.py; here we test the gather + reply."""
+"""Handler-seam tests for /advance (the longest-break tracer + Book button). The
+optimizer math is covered directly in test_optimizer.py; here we test the gather,
+the rendered options, and the prefilled apply modal the Book button opens."""
 
 from datetime import date
 
-from leave.handlers import ADVANCE_NOTHING, CONTACT_ADMIN, _suggest_breaks, open_advance
+from leave.blocks import ADVANCE_BOOK_ACTION, LEAVE_CALLBACK_ID
+from leave.db import get_employee
+from leave.handlers import (
+    ADVANCE_NOTHING,
+    CONTACT_ADMIN,
+    _suggest_breaks,
+    open_advance,
+    open_book_modal,
+)
 from leave.seed import upsert_employee
 from leave.validation import validate_request
-from leave.db import get_employee
-from tests.fakes import FakeAck
+from tests.fakes import FakeAck, FakeSlackClient, make_action_body
 
 TODAY = date(2026, 6, 8)  # a Monday
+
+
+def _option_text(response):
+    """All section text from a blocks /advance reply, joined."""
+    return "\n".join(
+        b["text"]["text"] for b in response["blocks"] if b.get("type") == "section"
+    )
+
+
+def _book_buttons(response):
+    return [
+        b["accessory"]
+        for b in response["blocks"]
+        if b.get("accessory", {}).get("action_id") == ADVANCE_BOOK_ACTION
+    ]
+
+
+def _block_element(view, block_id):
+    return next(b for b in view["blocks"] if b.get("block_id") == block_id)["element"]
 
 
 def test_unregistered_user_gets_contact_admin(db):
@@ -22,8 +49,9 @@ def test_caller_with_balance_gets_a_break(db):
     upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
     ack = FakeAck()
     open_advance(ack=ack, body={"user_id": "U_A"}, db=db, today=TODAY)
-    assert "days off" in ack.response
-    assert "Book vacation" in ack.response
+    text = _option_text(ack.response)
+    assert "days off" in text
+    assert "Book vacation" in text
 
 
 def test_top_of_chain_caller_gets_a_result(db):
@@ -32,7 +60,7 @@ def test_top_of_chain_caller_gets_a_result(db):
     ack = FakeAck()
     open_advance(ack=ack, body={"user_id": "U_SOLO"}, db=db, today=TODAY)
     assert ack.response != ADVANCE_NOTHING
-    assert "Book vacation" in ack.response
+    assert "Book vacation" in _option_text(ack.response)
 
 
 def test_no_balance_gets_nothing_to_suggest(db):
@@ -47,7 +75,36 @@ def test_caller_with_balance_gets_multiple_distinct_options(db):
     upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
     ack = FakeAck()
     open_advance(ack=ack, body={"user_id": "U_A"}, db=db, today=TODAY)
-    assert "*1.*" in ack.response and "*2.*" in ack.response
+    text = _option_text(ack.response)
+    assert "*1.*" in text and "*2.*" in text
+
+
+def test_each_option_has_a_book_button_carrying_its_dates(db):
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    emp = get_employee(db, "U_A")
+    breaks = _suggest_breaks(db, emp, TODAY)
+    ack = FakeAck()
+    open_advance(ack=ack, body={"user_id": "U_A"}, db=db, today=TODAY)
+    buttons = _book_buttons(ack.response)
+    assert len(buttons) == len(breaks)
+    # The first button carries the first break's start|end dates.
+    first = breaks[0]
+    assert buttons[0]["value"] == f"{first.book_start.isoformat()}|{first.book_end.isoformat()}"
+
+
+def test_book_button_opens_prefilled_apply_modal(db):
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    client = FakeSlackClient()
+    ack = FakeAck()
+    body = make_action_body("2026-06-01|2026-06-05", "U_A")
+    open_book_modal(ack=ack, body=body, client=client, db=db, today=TODAY)
+    assert ack.called
+    view = client.views_open_calls[0]["view"]
+    assert view["callback_id"] == LEAVE_CALLBACK_ID
+    # Dates pre-filled, leave type defaulted to vacation (a break is vacation-only).
+    assert _block_element(view, "start_date")["initial_date"] == "2026-06-01"
+    assert _block_element(view, "end_date")["initial_date"] == "2026-06-05"
+    assert _block_element(view, "leave_type")["initial_option"]["value"] == "vacation"
 
 
 def test_every_suggested_break_passes_validation(db):

@@ -3,6 +3,9 @@
 LEAVE_TYPES = ["sick", "vacation", "personal"]
 
 LEAVE_CALLBACK_ID = "leave_submit"
+# /advance "Book" button: opens the apply modal pre-filled with a suggested
+# break's dates. The button value is "start|end" (ISO), both vacation full-day.
+ADVANCE_BOOK_ACTION = "advance_book"
 APPROVE_ACTION = "approve_request"
 DECLINE_ACTION = "decline_request"
 DECLINE_CALLBACK_ID = "decline_submit"
@@ -38,9 +41,18 @@ def format_period(start, end, half=None):
     return f"{start} → {end}"
 
 
-def build_leave_modal(balances=None):
+def _leave_type_options():
+    return [
+        {"text": {"type": "plain_text", "text": t.capitalize()}, "value": t} for t in LEAVE_TYPES
+    ]
+
+
+def build_leave_modal(balances=None, prefill=None):
     """The /dayoff request modal. If balances ({type: days_left}) is given, a
-    context line at the top shows the remaining balance per leave type."""
+    context line at the top shows the remaining balance per leave type. `prefill`
+    ({"leave_type","start","end"} with ISO date strings), when given, pre-fills the
+    form — used by /advance's Book button to open this modal on a suggested break."""
+    prefill = prefill or {}
     blocks = []
 
     if balances:
@@ -52,26 +64,36 @@ def build_leave_modal(balances=None):
             }
         )
 
+    leave_type_el = {
+        "type": "static_select",
+        "action_id": "value",
+        "options": _leave_type_options(),
+    }
+    if prefill.get("leave_type"):
+        leave_type_el["initial_option"] = {
+            "text": {"type": "plain_text", "text": prefill["leave_type"].capitalize()},
+            "value": prefill["leave_type"],
+        }
+    start_el = {"type": "datepicker", "action_id": "value"}
+    if prefill.get("start"):
+        start_el["initial_date"] = prefill["start"]
+    end_el = {"type": "datepicker", "action_id": "value"}
+    if prefill.get("end"):
+        end_el["initial_date"] = prefill["end"]
+
     blocks.extend(
         [
             {
                 "type": "input",
                 "block_id": "leave_type",
                 "label": {"type": "plain_text", "text": "Leave type"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "value",
-                    "options": [
-                        {"text": {"type": "plain_text", "text": t.capitalize()}, "value": t}
-                        for t in LEAVE_TYPES
-                    ],
-                },
+                "element": leave_type_el,
             },
             {
                 "type": "input",
                 "block_id": "start_date",
                 "label": {"type": "plain_text", "text": "Start date"},
-                "element": {"type": "datepicker", "action_id": "value"},
+                "element": start_el,
             },
             {
                 "type": "input",
@@ -79,7 +101,7 @@ def build_leave_modal(balances=None):
                 "optional": True,
                 "label": {"type": "plain_text", "text": "End date"},
                 "hint": {"type": "plain_text", "text": "Leave empty for a single-day leave."},
-                "element": {"type": "datepicker", "action_id": "value"},
+                "element": end_el,
             },
             {
                 "type": "input",
@@ -128,6 +150,43 @@ def build_leave_modal(balances=None):
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
     }
+
+
+def _advance_option_line(index, brk):
+    book = brk.book_start.isoformat()
+    if brk.book_end != brk.book_start:
+        book += f" → {brk.book_end.isoformat()}"
+    unit = "day" if brk.cost == 1 else "days"
+    return (
+        f"*{index}.* Book vacation *{book}* ({brk.cost} {unit}) → "
+        f"*{brk.span_days} days off* ({brk.span_start.isoformat()} → {brk.span_end.isoformat()})"
+    )
+
+
+def build_advance_blocks(breaks):
+    """/advance reply blocks: a header plus one section per suggested break, each
+    with a Book button that opens the apply modal pre-filled with that break's
+    dates (value `start|end`, ISO). `breaks` is non-empty."""
+    header = (
+        "🌴 Your best break options this year:"
+        if len(breaks) > 1
+        else "🌴 Your longest possible break this year:"
+    )
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": header}}]
+    for i, brk in enumerate(breaks, 1):
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": _advance_option_line(i, brk)},
+                "accessory": {
+                    "type": "button",
+                    "action_id": ADVANCE_BOOK_ACTION,
+                    "text": {"type": "plain_text", "text": "Book"},
+                    "value": f"{brk.book_start.isoformat()}|{brk.book_end.isoformat()}",
+                },
+            }
+        )
+    return blocks
 
 
 def build_ticket(
