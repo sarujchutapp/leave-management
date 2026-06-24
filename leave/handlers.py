@@ -12,6 +12,7 @@ from leave.blocks import (
     MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
     build_advance_blocks,
+    build_burnout_board_blocks,
     build_cancel_modal,
     build_group_picker_modal,
     build_group_result_blocks,
@@ -33,7 +34,12 @@ from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import employee_with_name, get_employee, list_employees, list_reports
 from leave.policy import get_policy, set_policy
-from leave.report import build_burnout_csv, build_history_csv, build_report_csv
+from leave.report import (
+    build_burnout_csv,
+    build_history_csv,
+    build_report_csv,
+    ranked_burnout_signals,
+)
 from leave.seed import delete_employee, set_allowance_override, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
 from leave.holidays import all_holidays, apply_holidays, delete_holiday, holidays_for_year
@@ -700,6 +706,52 @@ def submit_group_break(ack, body, view, client, db, today=None):
     compute + DM the shared window."""
     ack()
     submit_group_break_apply(body, view, client, db, today)
+
+
+NOT_A_MANAGER = "You don't manage anyone, so there's no burnout board to show."
+
+
+def _direct_reports(db, manager_id):
+    """The caller's direct reports — employees whose manager is the caller, the
+    caller themselves excluded (a self-managed top-of-chain person doesn't report
+    to themselves). Reserved/config items carry no manager_id, so they never match."""
+    return [r for r in list_reports(db, manager_id) if r["slack_user_id"] != manager_id]
+
+
+def open_burnout_ack(ack, body, db):
+    """`/burnout` ack phase (under 3s): a quick manager gate via one employees scan.
+    A caller who manages no one gets a clear note here; a manager gets a brief
+    acknowledgement and the board is built + DMed post-ack (it reads several
+    records, so it can't run in the ack window — like the /control report)."""
+    if not _direct_reports(db, body["user_id"]):
+        ack(NOT_A_MANAGER)
+        return
+    ack("🔍 Building your burnout board…")
+
+
+def open_burnout_apply(body, db, client, today=None):
+    """Post-ack work: rank the caller's direct reports by burnout risk and DM them
+    the board. Scoped strictly to the caller's own reports (the privacy guardrail);
+    re-reads them because Lambda lazy listeners fire regardless of the ack result,
+    so a caller who manages no one posts nothing (they already saw the note)."""
+    today = today or date.today()
+    caller_id = body["user_id"]
+    reports = _direct_reports(db, caller_id)
+    if not reports:
+        return
+    signals = ranked_burnout_signals(db, reports, today)
+    client.chat_postMessage(
+        channel=caller_id,
+        text="Burnout board — your direct reports ranked by burnout risk",
+        blocks=build_burnout_board_blocks(signals),
+    )
+
+
+def open_burnout(ack, body, db, client, today=None):
+    """Synchronous `/burnout` (Socket Mode / tests): manager-gate-and-ack, then
+    build + DM the board."""
+    open_burnout_ack(ack, body, db)
+    open_burnout_apply(body, db, client, today)
 
 
 def _to_gregorian(d):

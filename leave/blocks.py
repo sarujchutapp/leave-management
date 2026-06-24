@@ -211,6 +211,31 @@ def build_advance_blocks(breaks):
     return blocks
 
 
+def build_burnout_board_blocks(signals):
+    """/burnout board reply blocks: a header plus one section per direct report,
+    ranked by no-break stretch (longest first). Each row spells out the explainable
+    flags — days since last leave, remaining vacation vs days left in the year, and
+    longest working stretch — never an opaque score. `signals` is non-empty."""
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🔥 *Burnout board* — your direct reports, most at risk first:",
+            },
+        }
+    ]
+    for s in signals:
+        line = (
+            f"*{s.name}*\n"
+            f"• {s.stretch} days since last leave\n"
+            f"• {s.remaining} vacation days left · {s.days_left} days left in the year\n"
+            f"• longest working stretch: {s.working} days"
+        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line}})
+    return blocks
+
+
 def build_group_result_blocks(window, text):
     """The group-break result message: the shareable text plus a "Book mine"
     button that opens the apply modal pre-filled with the shared window's dates
