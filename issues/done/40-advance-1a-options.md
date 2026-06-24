@@ -38,21 +38,25 @@ renders the 2–3 options, each with its dates, cost, and resulting span.
 
 - `leave/optimizer.py`: extracted the candidate generation into `_all_candidates`
   and added `top_breaks(..., limit=3)` — ranks all valid breaks longest-first
-  (then least quota, then earliest) and greedily keeps distinct ones: a new option
-  is accepted only if its days-off span overlaps each already-chosen option's span
-  by ≤ 2 days (so adjacent breaks may share a boundary weekend, but >2-day
-  framings of the same break collapse to the better-ranked one). `longest_break`
-  now delegates to `top_breaks(limit=1)` (kept + still tested for the single best).
+  (then least quota, then earliest) and greedily keeps distinct ones. Distinctness
+  (`_distinct_options`): two options are kept apart only when their days-off spans
+  differ on **more days than they share** — the days in exactly one span must
+  outnumber the days in both (`lenA + lenB - 2*overlap > overlap`). So options may
+  share a boundary weekend, but a break that mostly retraces another collapses to
+  the better-ranked one. `longest_break` now delegates to `top_breaks(limit=1)`
+  (kept + still tested for the single best).
 - `_span_overlap_days` measures shared days-off calendar days between two breaks.
 - `leave/handlers.py`: `_suggest_breaks` (top_breaks gather) + `_render_breaks`
   render a numbered, longest-first list in `/advance`; degrades to one line when
   only one distinct break exists, and to ADVANCE_NOTHING when none.
-- Tests: `tests/test_optimizer.py` (distinct options, ≤2-day overlap invariant,
-  degrade-to-one, empty); `tests/test_advance.py` (multiple numbered options +
-  every suggested break passes validate_request).
+- Tests: `tests/test_optimizer.py` (distinct options, unique>shared invariant,
+  the `_distinct_options` rule incl. its equal-days boundary, degrade-to-one,
+  empty); `tests/test_advance.py` (multiple numbered options + every suggested
+  break passes validate_request).
 
-Decisions: the >2-day collapse is measured on the *days-off span* (not the
-booking). The literal "≤2 allowed" rule can surface small tail sub-breaks only
-when fewer than 3 large distinct breaks exist (e.g. late in the year) — acceptable,
-since those are the only windows left. No new UI/interactive surface (still a text
-reply); the Book button and group-break picker are later slices (#41, #42).
+Decisions: distinctness is measured on the *days-off span* (not the booking), and
+the rule is proportional — two options stay distinct only when their unique days
+outnumber their shared days (replacing the original flat ">2 days" threshold, per
+follow-up feedback). Equal unique/shared collapses. No new UI/interactive surface
+(still a text reply); the Book button and group-break picker are later slices
+(#41, #42).

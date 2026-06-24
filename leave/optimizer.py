@@ -101,18 +101,29 @@ def _span_overlap_days(a, b):
     return max(0, (hi - lo).days + 1)
 
 
+def _distinct_options(a, b):
+    """Whether two breaks are distinct options rather than framings of the same
+    break: their days-off spans must differ on more days than they share — the
+    days in exactly one span outnumber the days in both. So options may share a
+    boundary weekend, but a break that mostly retraces another collapses to the
+    better-ranked one."""
+    overlap = _span_overlap_days(a, b)
+    non_overlap = a.span_days + b.span_days - 2 * overlap
+    return non_overlap > overlap
+
+
 def top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=3):
     """Up to `limit` distinct break options, longest-first (then least quota,
-    then earliest). Two options that share more than 2 days of their days-off
-    span are framings of the same break, so the better-ranked one is kept and the
-    other dropped; a 1-2 day overlap (e.g. a shared boundary weekend) is allowed.
-    Degrades to fewer (or none) when fewer distinct breaks exist."""
+    then earliest). Two options are kept apart only when their days-off spans
+    differ on more days than they share (see `_distinct_options`); otherwise the
+    better-ranked one is kept and the other dropped. Degrades to fewer (or none)
+    when fewer distinct breaks exist."""
     ranked = sorted(
         _all_candidates(today, year_end, balance, holidays, existing_ranges, cap), key=_sort_key
     )
     chosen = []
     for cand in ranked:
-        if all(_span_overlap_days(cand, c) <= 2 for c in chosen):
+        if all(_distinct_options(cand, c) for c in chosen):
             chosen.append(cand)
             if len(chosen) == limit:
                 break
