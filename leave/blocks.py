@@ -206,6 +206,29 @@ def build_advance_blocks(breaks):
     return blocks
 
 
+def build_group_result_blocks(window, text):
+    """The group-break result message: the shareable text plus a "Book mine"
+    button that opens the apply modal pre-filled with the shared window's dates
+    for the requester only (reuses ADVANCE_BOOK_ACTION). `window` is (start, end);
+    `text` is the copy-pasteable line kept as the message body."""
+    start, end = window
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {
+            "type": "actions",
+            "block_id": "group_book",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": ADVANCE_BOOK_ACTION,
+                    "text": {"type": "plain_text", "text": "Book mine"},
+                    "value": f"{start.isoformat()}|{end.isoformat()}",
+                }
+            ],
+        },
+    ]
+
+
 def build_group_picker_modal():
     """Modal to pick teammates for the group-break finder. The caller is always
     included, so the picker is optional — submitting with nobody selected just
