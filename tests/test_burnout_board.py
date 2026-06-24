@@ -136,6 +136,43 @@ def test_report_who_never_took_leave_is_handled(db):
     assert "Alice" in _board_text(client)
 
 
+def test_board_shows_expiring_quota_flag_when_days_will_be_forfeited(db):
+    set_policy(db)  # default cap: 5 vacation days may carry over
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_A", "Alice", "U_M")  # fresh: 10 vacation, 5 over the cap
+    client = FakeSlackClient()
+
+    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
+
+    assert "5 vacation days expiring Dec 31" in _board_text(client)
+
+
+def test_board_indicates_none_when_nothing_will_expire(db):
+    # A generous carry-over cap means the whole balance carries — nothing forfeited.
+    set_policy(db, max_carry_over={"vacation": 20})
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_A", "Alice", "U_M")
+    client = FakeSlackClient()
+
+    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
+
+    text = _board_text(client)
+    assert "no vacation expiring this year" in text
+    assert "expiring Dec 31" not in text
+
+
+def test_expiring_flag_is_computed_at_the_year_boundary(db):
+    # On Dec 31 (no days left) the flag is still computed from the balance vs cap.
+    set_policy(db)
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_A", "Alice", "U_M")
+    client = FakeSlackClient()
+
+    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=date(2026, 12, 31))
+
+    assert "5 vacation days expiring Dec 31" in _board_text(client)
+
+
 def test_board_and_csv_compute_the_same_signals(db):
     # The board and the /control burnout CSV share one computation, so a row's
     # numbers must match between them — they cannot drift.

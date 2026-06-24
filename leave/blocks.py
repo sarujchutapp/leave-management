@@ -226,11 +226,17 @@ def build_burnout_board_blocks(signals):
         }
     ]
     for s in signals:
+        expiring = (
+            f"⚠️ {s.expiring} vacation days expiring Dec 31"
+            if s.expiring
+            else "no vacation expiring this year"
+        )
         line = (
             f"*{s.name}*\n"
             f"• {s.stretch} days since last leave\n"
             f"• {s.remaining} vacation days left · {s.days_left} days left in the year\n"
-            f"• longest working stretch: {s.working} days"
+            f"• longest working stretch: {s.working} days\n"
+            f"• {expiring}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line}})
     return blocks
