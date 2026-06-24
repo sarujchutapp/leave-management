@@ -2,11 +2,73 @@
 no DB, no Slack. June 2026 starts on a Monday (2026-06-01 = Mon), which the
 date arithmetic below relies on."""
 
-from datetime import date
+from datetime import date, timedelta
 
-from leave.optimizer import LeaveBreak, _distinct_options, longest_break, top_breaks
+from leave.optimizer import (
+    LeaveBreak,
+    Member,
+    _distinct_options,
+    group_break,
+    longest_break,
+    top_breaks,
+)
 
 YEAR_END = date(2026, 12, 31)
+
+
+def _working_days(start, end, holidays=frozenset()):
+    n, d = 0, start
+    while d <= end:
+        if d.weekday() < 5 and d not in holidays:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+# --- Group-break finder (#42) ------------------------------------------------
+
+
+def test_group_break_longest_common_window():
+    # Two members, balance 5 and cap 9 each, no holidays/leave. The longest window
+    # both can be off is one Mon-Fri week sandwiched by weekends (9 days), earliest
+    # such window starting on a Saturday on/after today.
+    members = [Member(5, 9, []), Member(5, 9, [])]
+    assert group_break(date(2026, 6, 1), YEAR_END, set(), members) == (
+        date(2026, 6, 6),
+        date(2026, 6, 14),
+    )
+
+
+def test_group_break_respects_smallest_balance():
+    # One member can only afford 2 vacation days, so the shared window can contain
+    # at most 2 working days however generous the other member is.
+    members = [Member(5, 9, []), Member(2, 9, [])]
+    window = group_break(date(2026, 6, 1), YEAR_END, set(), members)
+    assert window is not None
+    assert _working_days(*window) == 2
+
+
+def test_group_break_builds_around_a_shared_existing_booking():
+    # Both already hold the same Mon-Fri week (06-08..06-12); it costs them nothing,
+    # so with only 2 spare days each the window extends to wrap that week plus two
+    # paid days before it.
+    booked = [(date(2026, 6, 8), date(2026, 6, 12))]
+    members = [Member(2, 15, booked), Member(2, 15, list(booked))]
+    assert group_break(date(2026, 6, 1), YEAR_END, set(), members) == (
+        date(2026, 6, 4),
+        date(2026, 6, 14),
+    )
+
+
+def test_group_break_infeasible_returns_none():
+    # A member with no vacation left can't be off on any working day, so no shared
+    # window with a real break exists.
+    members = [Member(5, 9, []), Member(0, 9, [])]
+    assert group_break(date(2026, 6, 1), YEAR_END, set(), members) is None
+
+
+def test_group_break_no_members_returns_none():
+    assert group_break(date(2026, 6, 1), YEAR_END, set(), []) is None
 
 
 def _overlap_days(a, b):

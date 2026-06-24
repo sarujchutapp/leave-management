@@ -135,3 +135,78 @@ def longest_break(today, year_end, balance, holidays, existing_ranges, cap):
     [today, year_end], or None if nothing is bookable."""
     best = top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=1)
     return best[0] if best else None
+
+
+# --- Group-break finder (the optimizer's second job) -------------------------
+
+# One person in a group-break search: their remaining vacation `balance`, their
+# consecutive `cap`, and their `existing_ranges` of full-day leave. Holidays are
+# company-wide and passed separately.
+Member = namedtuple("Member", "balance cap existing_ranges")
+
+
+def _member_can_be_off(member, w_start, w_end, holidays):
+    """Whether `member` can be off for the whole window [w_start, w_end]: the new
+    vacation days it costs them fit their balance, and the continuous absence it
+    forms (window + their adjacent leave/weekends/holidays) stays within their cap."""
+    cost = 0
+    d = w_start
+    while d <= w_end:
+        if d.weekday() < 5 and d not in holidays and not _in_ranges(d, member.existing_ranges):
+            cost += 1
+        d += _ONE
+    if cost > member.balance:
+        return False
+
+    def worked(d):
+        if w_start <= d <= w_end:
+            return False
+        if d.weekday() >= 5 or d in holidays:
+            return False
+        return not _in_ranges(d, member.existing_ranges)
+
+    run_start, run_end, guard = w_start, w_end, 0
+    while guard < 400 and not worked(run_start - _ONE):
+        run_start -= _ONE
+        guard += 1
+    guard = 0
+    while guard < 400 and not worked(run_end + _ONE):
+        run_end += _ONE
+        guard += 1
+    return (run_end - run_start).days + 1 <= member.cap
+
+
+def _in_ranges(d, ranges):
+    return any(s <= d <= e for s, e in ranges)
+
+
+def _has_working_day(w_start, w_end, holidays):
+    d = w_start
+    while d <= w_end:
+        if d.weekday() < 5 and d not in holidays:
+            return True
+        d += _ONE
+    return False
+
+
+def group_break(today, year_end, holidays, members):
+    """The longest single window in [today, year_end] every member can be off at
+    once (vacation-only, each within their own balance, cap and existing
+    bookings), or None if no such shared break exists. Returns just the (start,
+    end) window — never any individual's balance or which member was the binding
+    constraint. The window must contain a real working day (a pure weekend isn't a
+    break); ties on length resolve to the earliest window."""
+    if not members:
+        return None
+    max_len = min(min(m.cap for m in members), (year_end - today).days + 1)
+    for length in range(max_len, 0, -1):
+        w_start = today
+        last_start = year_end - timedelta(days=length - 1)
+        while w_start <= last_start:
+            w_end = w_start + timedelta(days=length - 1)
+            if _has_working_day(w_start, w_end, holidays) and all(
+                _member_can_be_off(m, w_start, w_end, holidays) for m in members
+            ):
+                return (w_start, w_end)
+            w_start += _ONE
+    return None
