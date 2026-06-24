@@ -18,7 +18,7 @@ from leave.blocks import LEAVE_TYPES
 from leave.board import BOARD_KEY
 from leave.burnout import longest_working_stretch, no_break_stretch
 from leave.db import get_employee
-from leave.holidays import holidays_between, holidays_for_year
+from leave.holidays import HOLIDAYS_KEY, holidays_between, holidays_for_year
 from leave.policy import POLICY_KEY
 from leave.requests import (
     approved_weekdays_by_type_this_year,
@@ -27,7 +27,7 @@ from leave.requests import (
     remaining_balances,
 )
 
-RESERVED = {POLICY_KEY, BOARD_KEY}
+RESERVED = {POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY}
 HEADER = ["employee", "leave type", "used", "remaining", "carry-in"]
 HISTORY_HEADER = [
     "employee",

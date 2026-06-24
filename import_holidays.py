@@ -1,5 +1,7 @@
-"""Import company holidays from a CSV into the leave_holidays table and mirror
-them onto the shared Team Leave calendar. Run as yourself (not the deploy role):
+"""Import company holidays from a CSV into the reserved `__holidays__` item and
+mirror them onto the shared Team Leave calendar (see ADR-0006). Admins can also
+add/remove holidays from /control; this script is the bulk-seed path. Run as
+yourself (not the deploy role):
 
     source .venv/bin/activate
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN

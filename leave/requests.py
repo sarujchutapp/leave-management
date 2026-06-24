@@ -16,7 +16,7 @@ from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
 from leave.board import BOARD_KEY, reset_board
-from leave.holidays import holidays_between, holidays_for_year
+from leave.holidays import HOLIDAYS_KEY, holidays_between, holidays_for_year
 from leave.policy import POLICY_KEY, allowance_for, get_policy
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,7 @@ def recompute_all_carry_in(db, year):
     while True:
         resp = db.employees.scan(**scan_kwargs)
         for item in resp["Items"]:
-            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY):
+            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY):
                 continue
             recompute_carry_in(db, item, year)
             count += 1
