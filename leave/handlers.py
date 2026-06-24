@@ -12,6 +12,7 @@ from leave.blocks import (
     REPORT_TYPE_ACTION,
     build_advance_blocks,
     build_cancel_modal,
+    build_group_picker_modal,
     build_carry_over_modal,
     build_clear_modal,
     build_control_menu,
@@ -33,7 +34,7 @@ from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.seed import delete_employee, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
 from leave.holidays import holidays_for_year
-from leave.optimizer import top_breaks
+from leave.optimizer import Member, group_break, top_breaks
 from leave.requests import (
     active_full_leave_ranges,
     approve_request,
@@ -61,6 +62,10 @@ NOT_ADMIN = "Sorry, /control is for admins only."
 ADVANCE_NOTHING = (
     "No vacation break to suggest right now — you may be out of vacation balance, "
     "or have no open stretch left this year."
+)
+GROUP_NO_WINDOW = (
+    "No window found where everyone can be off together in the rest of the year — "
+    "try a smaller group or different people."
 )
 
 
@@ -509,6 +514,60 @@ def open_book_modal(ack, body, client, db, today=None):
             balances, prefill={"leave_type": "vacation", "start": start, "end": end}
         ),
     )
+
+
+def open_group_picker(ack, body, client):
+    """/advance 'Plan a group break' button: open the people-picker modal. Fast
+    (modal open only), so it runs synchronously in both run modes."""
+    ack()
+    client.views_open(trigger_id=body["trigger_id"], view=build_group_picker_modal())
+
+
+def _gather_member(db, employee, today, holidays, cap):
+    return Member(
+        remaining_balance(db, employee, "vacation", today),
+        cap,
+        active_full_leave_ranges(db, employee["slack_user_id"]),
+    )
+
+
+def _render_group_result(window):
+    if window is None:
+        return GROUP_NO_WINDOW
+    start, end = window
+    days = (end - start).days + 1
+    return (
+        f"👥 Longest window you can all be off together: {start.isoformat()} to "
+        f"{end.isoformat()} ({days} days). Everyone books their own leave for these dates."
+    )
+
+
+def submit_group_break_apply(body, view, client, db, today=None):
+    """Post-ack work: gather the caller + picked people, find the longest window
+    they can all be off together, and DM the caller the shareable result. Reveals
+    only the window — never an individual's balance or whose constraint bound it."""
+    today = today or date.today()
+    caller_id = body["user"]["id"]
+    caller = get_employee(db, caller_id)
+    if caller is None:
+        return
+    picked = view["state"]["values"]["people"]["value"].get("selected_users") or []
+    holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
+    cap = get_policy(db)["consecutive_limit"]["vacation"]
+    members = []
+    for uid in dict.fromkeys([caller_id] + picked):  # caller first, de-duplicated
+        emp = get_employee(db, uid)
+        if emp is not None:
+            members.append(_gather_member(db, emp, today, holidays, cap))
+    window = group_break(today, date(today.year, 12, 31), holidays, members)
+    _notify(client, caller_id, _render_group_result(window))
+
+
+def submit_group_break(ack, body, view, client, db, today=None):
+    """Synchronous submit (Socket Mode / tests): ack to close the modal, then
+    compute + DM the shared window."""
+    ack()
+    submit_group_break_apply(body, view, client, db, today)
 
 
 def _to_gregorian(d):

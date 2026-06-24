@@ -4,14 +4,17 @@ the rendered options, and the prefilled apply modal the Book button opens."""
 
 from datetime import date
 
-from leave.blocks import ADVANCE_BOOK_ACTION, LEAVE_CALLBACK_ID
+from leave.blocks import ADVANCE_BOOK_ACTION, GROUP_CALLBACK_ID, GROUP_PICK_ACTION, LEAVE_CALLBACK_ID
 from leave.db import get_employee
 from leave.handlers import (
     ADVANCE_NOTHING,
     CONTACT_ADMIN,
+    GROUP_NO_WINDOW,
     _suggest_breaks,
     open_advance,
     open_book_modal,
+    open_group_picker,
+    submit_group_break,
 )
 from leave.seed import upsert_employee
 from leave.validation import validate_request
@@ -105,6 +108,67 @@ def test_book_button_opens_prefilled_apply_modal(db):
     assert _block_element(view, "start_date")["initial_date"] == "2026-06-01"
     assert _block_element(view, "end_date")["initial_date"] == "2026-06-05"
     assert _block_element(view, "leave_type")["initial_option"]["value"] == "vacation"
+
+
+def _group_view(selected):
+    return {"state": {"values": {"people": {"value": {"selected_users": selected}}}}}
+
+
+def test_advance_offers_group_break_button(db):
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    ack = FakeAck()
+    open_advance(ack=ack, body={"user_id": "U_A"}, db=db, today=TODAY)
+    actions = [b for b in ack.response["blocks"] if b.get("type") == "actions"]
+    assert any(e["action_id"] == GROUP_PICK_ACTION for b in actions for e in b["elements"])
+
+
+def test_group_picker_opens_with_people_select(db):
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_group_picker(ack=ack, body={"user": {"id": "U_A"}, "trigger_id": "T"}, client=client)
+    assert ack.called
+    view = client.views_open_calls[0]["view"]
+    assert view["callback_id"] == GROUP_CALLBACK_ID
+    people = next(b for b in view["blocks"] if b.get("block_id") == "people")
+    assert people["element"]["type"] == "multi_users_select"
+
+
+def test_group_break_submit_dms_shared_window(db):
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    upsert_employee(db, "U_B", "Bob", None, allowances={"vacation": 5})
+    client = FakeSlackClient()
+    ack = FakeAck()
+    submit_group_break(
+        ack=ack,
+        body={"user": {"id": "U_A"}},
+        view=_group_view(["U_B"]),
+        client=client,
+        db=db,
+        today=date(2026, 6, 8),
+    )
+    assert ack.called
+    dm = client.chat_postMessage_calls[0]
+    assert dm["channel"] == "U_A"  # DM'd to the caller
+    assert "off together" in dm["text"]
+    assert " to 2026-" in dm["text"]  # a concrete shared window
+    # Privacy: only the window — no balances or per-person detail.
+    assert "balance" not in dm["text"].lower()
+    assert "Bob" not in dm["text"] and "Alice" not in dm["text"]
+
+
+def test_group_break_submit_reports_no_common_window(db):
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    upsert_employee(db, "U_B", "Bob", None, allowances={"vacation": 0})  # can't be off
+    client = FakeSlackClient()
+    submit_group_break(
+        ack=FakeAck(),
+        body={"user": {"id": "U_A"}},
+        view=_group_view(["U_B"]),
+        client=client,
+        db=db,
+        today=date(2026, 6, 8),
+    )
+    assert client.chat_postMessage_calls[0]["text"] == GROUP_NO_WINDOW
 
 
 def test_every_suggested_break_passes_validation(db):

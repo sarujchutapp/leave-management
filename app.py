@@ -20,6 +20,8 @@ from leave.blocks import (
     ADVANCE_BOOK_ACTION,
     APPROVE_ACTION,
     CANCEL_CALLBACK_ID,
+    GROUP_CALLBACK_ID,
+    GROUP_PICK_ACTION,
     CARRY_OVER_ACTION,
     CARRY_OVER_CALLBACK_ID,
     CLEAR_ACTION,
@@ -43,6 +45,7 @@ from leave.handlers import (
     open_advance,
     open_book_modal,
     open_cancel_modal,
+    open_group_picker,
     open_carry_over,
     open_clear,
     open_control_menu,
@@ -59,6 +62,8 @@ from leave.handlers import (
     submit_clear,
     submit_clear_ack,
     submit_clear_apply,
+    submit_group_break,
+    submit_group_break_apply,
     submit_leave,
     submit_leave_ack,
     submit_leave_apply,
@@ -147,6 +152,11 @@ def build_app(calendar=None, faas=False):
     def _advance_book(ack, body, client):
         with db.connect() as d:
             open_book_modal(ack, body, client, d)
+
+    # "Plan a group break" button: opens the people-picker modal (fast).
+    @app.action(GROUP_PICK_ACTION)
+    def _group_pick(ack, body, client):
+        open_group_picker(ack, body, client)
 
     # Admin control plane. The menu open + View Settings only open modals / do a
     # keyed policy read (fast), so they run synchronously in both run modes. The
@@ -273,6 +283,14 @@ def build_app(calendar=None, faas=False):
                 submit_clear_apply(body, view, d, get_calendar(), get_sheets(), client, admin_ids)
 
         app.view(CLEAR_CALLBACK_ID)(ack=_clear_ack, lazy=[_clear_lazy])
+
+        # Group-break submit: ack closes the picker, then the multi-person search
+        # + DM run post-ack so the ack stays under 3s for larger groups.
+        def _group_break_lazy(body, view, client):
+            with db.connect() as d:
+                submit_group_break_apply(body, view, client, d)
+
+        app.view(GROUP_CALLBACK_ID)(ack=_ack, lazy=[_group_break_lazy])
     else:
 
         @app.view(LEAVE_CALLBACK_ID)
@@ -299,6 +317,11 @@ def build_app(calendar=None, faas=False):
         def _decline_submit(ack, body, view, client):
             with db.connect() as d:
                 handle_decline_submit(ack, body, view, client, d)
+
+        @app.view(GROUP_CALLBACK_ID)
+        def _group_break_submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_group_break(ack, body, view, client, d)
 
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):

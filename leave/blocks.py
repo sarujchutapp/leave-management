@@ -6,6 +6,9 @@ LEAVE_CALLBACK_ID = "leave_submit"
 # /advance "Book" button: opens the apply modal pre-filled with a suggested
 # break's dates. The button value is "start|end" (ISO), both vacation full-day.
 ADVANCE_BOOK_ACTION = "advance_book"
+# /advance "Plan a group break" button -> the people-picker modal (group-break finder).
+GROUP_PICK_ACTION = "advance_group_pick"
+GROUP_CALLBACK_ID = "advance_group_submit"
 APPROVE_ACTION = "approve_request"
 DECLINE_ACTION = "decline_request"
 DECLINE_CALLBACK_ID = "decline_submit"
@@ -186,7 +189,55 @@ def build_advance_blocks(breaks):
                 },
             }
         )
+    blocks.append(
+        {
+            "type": "actions",
+            "block_id": "advance_group",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": GROUP_PICK_ACTION,
+                    "text": {"type": "plain_text", "text": "👥 Plan a group break"},
+                    "value": "group",
+                }
+            ],
+        }
+    )
     return blocks
+
+
+def build_group_picker_modal():
+    """Modal to pick teammates for the group-break finder. The caller is always
+    included, so the picker is optional — submitting with nobody selected just
+    finds the caller's own window."""
+    return {
+        "type": "modal",
+        "callback_id": GROUP_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Group break"},
+        "submit": {"type": "plain_text", "text": "Find window"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Pick teammates to find a window you can *all* take off together. "
+                    "You're included automatically.",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "people",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "People"},
+                "element": {
+                    "type": "multi_users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick teammates"},
+                },
+            },
+        ],
+    }
 
 
 def build_ticket(
