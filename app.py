@@ -47,6 +47,9 @@ from leave.handlers import (
     handle_decline_submit,
     open_advance,
     open_book_modal,
+    open_burnout,
+    open_burnout_ack,
+    open_burnout_apply,
     open_cancel_modal,
     open_group_picker,
     open_holidays,
@@ -321,6 +324,18 @@ def build_app(calendar=None, faas=False):
                 submit_group_break_apply(body, view, client, d)
 
         app.view(GROUP_CALLBACK_ID)(ack=_ack, lazy=[_group_break_lazy])
+
+        # /burnout: the manager gate acks within 3s, then the board (several record
+        # reads) is built + DMed post-ack as a lazy listener, like the /control report.
+        def _burnout_ack(ack, body):
+            with db.connect() as d:
+                open_burnout_ack(ack, body, d)
+
+        def _burnout_lazy(body, client):
+            with db.connect() as d:
+                open_burnout_apply(body, d, client)
+
+        app.command("/burnout")(ack=_burnout_ack, lazy=[_burnout_lazy])
     else:
 
         @app.view(LEAVE_CALLBACK_ID)
@@ -367,6 +382,11 @@ def build_app(calendar=None, faas=False):
         def _report_submit(ack, body, view, client):
             with db.connect() as d:
                 submit_report(ack, body, view, d, client, admin_ids)
+
+        @app.command("/burnout")
+        def _burnout(ack, body, client):
+            with db.connect() as d:
+                open_burnout(ack, body, d, client)
 
     return app
 

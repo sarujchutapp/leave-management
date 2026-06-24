@@ -9,6 +9,7 @@ Pure `db -> CSV text` functions (no Slack), so they're tested directly:
 
 import csv
 import io
+from collections import namedtuple
 from datetime import date
 
 from boto3.dynamodb.conditions import Key
@@ -84,8 +85,15 @@ def build_report_csv(db, today):
     return out.getvalue()
 
 
-def _burnout_row(db, emp, today, holidays, year_start, year_end, days_left):
-    """One employee's burnout row: the no-break stretch (rank key) plus the
+# One employee's burnout signals, in the order the BURNOUT_HEADER lists them.
+# Shared by the burnout CSV report and the /burnout board so the two can't drift.
+BurnoutSignals = namedtuple(
+    "BurnoutSignals", ["name", "stretch", "remaining", "days_left", "working"]
+)
+
+
+def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left):
+    """One employee's burnout signals: the no-break stretch (rank key) plus the
     supporting flags. Past *approved* leave that has ended anchors the stretch;
     the earliest future approved/pending leave closes it. Approved/pending leave
     are the breaks that reset the longest working stretch."""
@@ -108,7 +116,23 @@ def _burnout_row(db, emp, today, holidays, year_start, year_end, days_left):
     stretch = no_break_stretch(today, max(taken_ends, default=None), min(booked_starts, default=None))
     working = longest_working_stretch(year_start, year_end, leave_ranges, holidays)
     remaining = remaining_balance(db, emp, "vacation", today)
-    return [emp.get("real_name", ""), stretch, remaining, days_left, working]
+    return BurnoutSignals(emp.get("real_name", ""), stretch, remaining, days_left, working)
+
+
+def ranked_burnout_signals(db, employees, today):
+    """Each employee's burnout signals, ranked by no-break stretch (longest first,
+    name as tie-break). The single computation the burnout CSV report and the
+    /burnout board both call, so the signals they show cannot drift."""
+    year_start = date(today.year, 1, 1)
+    year_end = date(today.year, 12, 31)
+    holidays = holidays_for_year(db, today.year)
+    days_left = (year_end - today).days
+    signals = [
+        employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left)
+        for emp in employees
+    ]
+    signals.sort(key=lambda s: (-s.stretch, s.name))
+    return signals
 
 
 def build_burnout_csv(db, today):
@@ -116,19 +140,11 @@ def build_burnout_csv(db, today):
     name as tie-break). Each row carries the supporting flags — remaining vacation
     vs days left in the year, and the longest working stretch — so the admin can
     see why a person ranks where they do. db -> CSV, like the other reports."""
-    year_start = date(today.year, 1, 1)
-    year_end = date(today.year, 12, 31)
-    holidays = holidays_for_year(db, today.year)
-    days_left = (year_end - today).days
-    rows = [
-        _burnout_row(db, emp, today, holidays, year_start, year_end, days_left)
-        for emp in _all_employees(db)
-    ]
-    rows.sort(key=lambda r: (-r[1], r[0]))
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(BURNOUT_HEADER)
-    writer.writerows(rows)
+    for s in ranked_burnout_signals(db, _all_employees(db), today):
+        writer.writerow([s.name, s.stretch, s.remaining, s.days_left, s.working])
     return out.getvalue()
 
 
