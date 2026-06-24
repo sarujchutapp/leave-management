@@ -13,6 +13,7 @@ from leave.blocks import (
     build_advance_blocks,
     build_cancel_modal,
     build_group_picker_modal,
+    build_group_result_blocks,
     build_carry_over_modal,
     build_clear_modal,
     build_control_menu,
@@ -532,8 +533,6 @@ def _gather_member(db, employee, today, holidays, cap):
 
 
 def _render_group_result(window):
-    if window is None:
-        return GROUP_NO_WINDOW
     start, end = window
     days = (end - start).days + 1
     return (
@@ -544,8 +543,9 @@ def _render_group_result(window):
 
 def submit_group_break_apply(body, view, client, db, today=None):
     """Post-ack work: gather the caller + picked people, find the longest window
-    they can all be off together, and DM the caller the shareable result. Reveals
-    only the window — never an individual's balance or whose constraint bound it."""
+    they can all be off together, and DM the caller the shareable result with a
+    Book-mine button. Reveals only the window — never an individual's balance or
+    whose constraint bound it."""
     today = today or date.today()
     caller_id = body["user"]["id"]
     caller = get_employee(db, caller_id)
@@ -560,7 +560,13 @@ def submit_group_break_apply(body, view, client, db, today=None):
         if emp is not None:
             members.append(_gather_member(db, emp, today, holidays, cap))
     window = group_break(today, date(today.year, 12, 31), holidays, members)
-    _notify(client, caller_id, _render_group_result(window))
+    if window is None:
+        _notify(client, caller_id, GROUP_NO_WINDOW)
+        return
+    text = _render_group_result(window)
+    client.chat_postMessage(
+        channel=caller_id, text=text, blocks=build_group_result_blocks(window, text)
+    )
 
 
 def submit_group_break(ack, body, view, client, db, today=None):

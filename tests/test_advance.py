@@ -156,6 +156,35 @@ def test_group_break_submit_dms_shared_window(db):
     assert "Bob" not in dm["text"] and "Alice" not in dm["text"]
 
 
+def test_group_result_has_book_mine_button_for_caller(db):
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
+    upsert_employee(db, "U_B", "Bob", None, allowances={"vacation": 5})
+    client = FakeSlackClient()
+    submit_group_break(
+        ack=FakeAck(),
+        body={"user": {"id": "U_A"}},
+        view=_group_view(["U_B"]),
+        client=client,
+        db=db,
+        today=date(2026, 6, 8),
+    )
+    dm = client.chat_postMessage_calls[0]
+    # Shareable text stays so teammates can coordinate and book themselves.
+    assert "off together" in dm["text"]
+    # A "Book mine" button reuses the prefilled-apply-modal mechanism (ADVANCE_BOOK_ACTION).
+    buttons = [
+        e
+        for b in dm.get("blocks", [])
+        if b.get("type") == "actions"
+        for e in b["elements"]
+    ]
+    book = [e for e in buttons if e["action_id"] == ADVANCE_BOOK_ACTION]
+    assert len(book) == 1
+    assert book[0]["text"]["text"] == "Book mine"
+    start, end = book[0]["value"].split("|")
+    assert start in dm["text"] and end in dm["text"]  # the shared window dates
+
+
 def test_group_break_submit_reports_no_common_window(db):
     upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 5})
     upsert_employee(db, "U_B", "Bob", None, allowances={"vacation": 0})  # can't be off
