@@ -4,7 +4,7 @@ date arithmetic below relies on."""
 
 from datetime import date
 
-from leave.optimizer import longest_break, top_breaks
+from leave.optimizer import LeaveBreak, _distinct_options, longest_break, top_breaks
 
 YEAR_END = date(2026, 12, 31)
 
@@ -24,11 +24,14 @@ def test_top_breaks_returns_up_to_three_distinct_options_longest_first():
     assert all(b.span_days == 9 for b in breaks)
 
 
-def test_top_breaks_options_never_overlap_more_than_two_days():
+def test_top_breaks_options_differ_on_more_days_than_they_share():
+    # Distinctness rule: the days in exactly one span must outnumber the shared days.
     breaks = top_breaks(date(2026, 6, 1), YEAR_END, 5, set(), [], 9)
     for i, a in enumerate(breaks):
         for b in breaks[i + 1:]:
-            assert _overlap_days(a, b) <= 2
+            overlap = _overlap_days(a, b)
+            non_overlap = a.span_days + b.span_days - 2 * overlap
+            assert non_overlap > overlap
 
 
 def test_top_breaks_degrades_to_one_when_only_one_window_fits():
@@ -40,6 +43,21 @@ def test_top_breaks_degrades_to_one_when_only_one_window_fits():
 
 def test_top_breaks_empty_when_no_balance():
     assert top_breaks(date(2026, 6, 1), YEAR_END, 0, set(), [], 15) == []
+
+
+def _brk(span_start, span_end):
+    days = (span_end - span_start).days + 1
+    return LeaveBreak(span_start, span_end, days, span_start, span_end, days)
+
+
+def test_distinct_options_rule_unique_must_exceed_shared():
+    # Share 2 days, differ on 14 -> distinct.
+    a = _brk(date(2026, 5, 30), date(2026, 6, 7))  # 9-day span
+    b = _brk(date(2026, 6, 6), date(2026, 6, 14))  # 9-day span, overlap 2
+    assert _distinct_options(a, b)
+    # Two 9-day spans sharing 6 days: shared (6) is not fewer than unique (6) -> collapse.
+    c = _brk(date(2026, 6, 2), date(2026, 6, 10))  # overlaps a on 06-02..06-07 = 6 days
+    assert not _distinct_options(a, c)
 
 
 def test_bridges_weekends_into_longest_run():
