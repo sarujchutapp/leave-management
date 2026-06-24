@@ -8,6 +8,7 @@ from leave.blocks import (
     CONTROL_MENU_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
+    MANAGE_ACTION_SELECT,
     MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
     REPORT_CALLBACK_ID,
@@ -32,6 +33,7 @@ from leave.handlers import (
     submit_leave_limits,
     submit_manage_employees,
     submit_report,
+    update_manage_modal,
     update_report_modal,
 )
 from leave.holidays import holidays_for_year, upsert_holiday
@@ -110,7 +112,7 @@ def _manage_view(employee, action="save", name=None, manager=None, overrides=Non
     overrides = overrides or {}
     values = {
         "employee": {"value": {"selected_user": employee}},
-        "action": {"value": {"selected_option": {"value": action}}},
+        "action": {MANAGE_ACTION_SELECT: {"selected_option": {"value": action}}},
         "name": {"value": {"value": name}},
         "manager": {"value": {"selected_user": manager}},
     }
@@ -822,7 +824,11 @@ def test_report_non_admin_rejected(db):
 # --- Manage employees (#35) --------------------------------------------------
 
 
-def test_manage_modal_opens_for_admin(db):
+def _manage_block_ids(view):
+    return {b.get("block_id") for b in view["blocks"]}
+
+
+def test_manage_modal_opens_on_add_edit(db):
     client = FakeSlackClient()
     ack = FakeAck()
     open_manage_employees(
@@ -833,16 +839,37 @@ def test_manage_modal_opens_for_admin(db):
     )
     view = client.views_push_calls[0]["view"]
     assert view["callback_id"] == MANAGE_EMPLOYEES_CALLBACK_ID
-    assert any(b.get("block_id") == "employee" for b in view["blocks"])
+    ids = _manage_block_ids(view)
+    # Default action is Add/edit: employee + action + name + manager, no overrides.
+    assert {"employee", "action", "name", "manager"} <= ids
+    assert "override_sick" not in ids
 
 
-def test_manage_add_creates_employee_with_override(db):
+def test_manage_modal_action_toggles_fields(db):
+    client = FakeSlackClient()
+    body = lambda action: {  # noqa: E731
+        "user": {"id": "U_ADMIN"},
+        "view": {"id": "V"},
+        "actions": [{"selected_option": {"value": action}}],
+    }
+    # Override action -> the three override fields, no name/manager.
+    update_manage_modal(ack=FakeAck(), body=body("override"), client=client, admin_ids=ADMINS)
+    ids = _manage_block_ids(client.views_update_calls[0]["view"])
+    assert "override_sick" in ids and "name" not in ids and "manager" not in ids
+    # Delete action -> neither the add/edit fields nor overrides.
+    update_manage_modal(ack=FakeAck(), body=body("delete"), client=client, admin_ids=ADMINS)
+    ids2 = _manage_block_ids(client.views_update_calls[1]["view"])
+    assert {"employee", "action"} <= ids2
+    assert not ({"name", "manager", "override_sick"} & ids2)
+
+
+def test_manage_add_creates_employee(db):
     client = FakeSlackClient()
     ack = FakeAck()
     submit_manage_employees(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        view=_manage_view("U_NEW", name="Newbie", manager="U_BOSS", overrides={"vacation": 15}),
+        view=_manage_view("U_NEW", action="save", name="Newbie", manager="U_BOSS"),
         client=client,
         db=db,
         admin_ids=ADMINS,
@@ -852,7 +879,62 @@ def test_manage_add_creates_employee_with_override(db):
     emp = get_employee(db, "U_NEW")
     assert emp["real_name"] == "Newbie"
     assert emp["manager_id"] == "U_BOSS"
+    assert "allowances" not in emp  # add/edit no longer sets an override
+
+
+def test_manage_save_requires_a_manager(db):
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_NEW", action="save", name="Newbie", manager=None),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "manager" in ack.response["errors"]
+    assert get_employee(db, "U_NEW") is None
+
+
+def test_manage_add_self_as_manager_marks_top_of_chain(db):
+    # Picking the person as their own manager is how an admin marks top-of-chain;
+    # their leave then auto-approves (see test_handlers).
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_TOP", action="save", name="Top", manager="U_TOP"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert get_employee(db, "U_TOP")["manager_id"] == "U_TOP"
+
+
+def test_manage_override_action_sets_then_clears(db):
+    upsert_employee(db, "U_A", "Alice", "U_A")
+    # Set a vacation override.
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_A", action="override", overrides={"vacation": 15}),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    emp = get_employee(db, "U_A")
     assert emp["allowances"] == {"vacation": 15}
+    assert emp["real_name"] == "Alice" and emp["manager_id"] == "U_A"  # untouched
+    # All blank clears the override (falls back to central policy).
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_A", action="override"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert "allowances" not in get_employee(db, "U_A")
 
 
 def test_manage_edit_updates_name_and_manager(db):

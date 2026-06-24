@@ -9,6 +9,7 @@ from datetime import date
 
 from leave.blocks import (
     CLEAR_CONFIRM_WORD,
+    MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
     build_advance_blocks,
     build_cancel_modal,
@@ -32,7 +33,7 @@ from leave.calendar_client import color_id_for
 from leave.db import get_employee, list_reports
 from leave.policy import get_policy, set_policy
 from leave.report import build_burnout_csv, build_history_csv, build_report_csv
-from leave.seed import delete_employee, upsert_employee
+from leave.seed import delete_employee, set_allowance_override, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
 from leave.holidays import holidays_for_year
 from leave.optimizer import Member, group_break, top_breaks
@@ -382,11 +383,22 @@ _OVERRIDE_TYPES = ("sick", "vacation", "personal")
 
 
 def open_manage_employees(ack, body, client, admin_ids):
-    """Manage employees button: re-checks admin, then pushes the add/edit/delete modal."""
+    """Manage employees button: re-checks admin, then pushes the modal (Add/edit by
+    default — the fields shown change with the Action select)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     client.views_push(trigger_id=body["trigger_id"], view=build_manage_employees_modal())
+
+
+def update_manage_modal(ack, body, client, admin_ids):
+    """Action select changed: re-render the modal in place so only the chosen action's
+    fields show (Add/edit → name + manager, Set override → allowances, Delete → none)."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    action = body["actions"][0]["selected_option"]["value"]
+    client.views_update(view_id=body["view"]["id"], view=build_manage_employees_modal(action))
 
 
 def _value(values, block_id):
@@ -409,16 +421,20 @@ def _parse_overrides(values):
     return (parsed or None), errors
 
 
+def _manage_action(values):
+    return values.get("action", {}).get(MANAGE_ACTION_SELECT, {}).get("selected_option", {}).get("value")
+
+
 def submit_manage_employees(ack, body, view, client, db, admin_ids):
-    """Add/edit (upsert) or delete an employee. Delete is block-and-tell: if the
-    target still manages anyone, the submit is rejected naming those reports and
-    nothing is deleted — no automatic re-parenting."""
+    """Add/edit, set an allowance override, or delete an employee, per the chosen
+    Action. Delete is block-and-tell: if the target still manages anyone, the submit
+    is rejected naming those reports — nothing deleted, no automatic re-parenting."""
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return
     values = view["state"]["values"]
     target = _value(values, "employee").get("selected_user")
-    action = _value(values, "action").get("selected_option", {}).get("value")
+    action = _manage_action(values)
 
     if action == "delete":
         reports = [r for r in list_reports(db, target) if r["slack_user_id"] != target]
@@ -436,16 +452,31 @@ def submit_manage_employees(ack, body, view, client, db, admin_ids):
         _notify(client, body["user"]["id"], f"🗑️ Removed <@{target}> from the leave system.")
         return
 
+    if action == "override":
+        overrides, errors = _parse_overrides(values)
+        if errors:
+            ack(response_action="errors", errors=errors)
+            return
+        ack(response_action="clear")
+        set_allowance_override(db, target, overrides)
+        what = "set" if overrides else "cleared"
+        _notify(client, body["user"]["id"], f"✅ Allowance override {what} for <@{target}>.")
+        return
+
+    # save (add / edit): name + manager, both required. Manager = the person
+    # themselves marks them top of chain (their leave auto-approves).
     name = (_value(values, "name").get("value") or "").strip()
-    overrides, errors = _parse_overrides(values)
+    manager = _value(values, "manager").get("selected_user")
+    errors = {}
     if not name:
-        errors["name"] = "Name is required to add or edit."
+        errors["name"] = "Name is required."
+    if not manager:
+        errors["manager"] = "Pick a manager — the person themselves if they're top of chain."
     if errors:
         ack(response_action="errors", errors=errors)
         return
     ack(response_action="clear")  # close the whole modal stack on success
-    manager = _value(values, "manager").get("selected_user")
-    upsert_employee(db, target, name, manager, allowances=overrides)
+    upsert_employee(db, target, name, manager, allowances=None)
     _notify(client, body["user"]["id"], f"✅ Saved {name} (<@{target}>).")
 
 

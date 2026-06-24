@@ -24,6 +24,9 @@ CLEAR_CALLBACK_ID = "control_clear_submit"
 # Typed exactly to confirm the destructive Clear wipe.
 CLEAR_CONFIRM_WORD = "CLEAR"
 MANAGE_EMPLOYEES_CALLBACK_ID = "control_manage_employees_submit"
+# The manage-employees Action select dispatches a block action so the modal can
+# show only the fields each action needs; it needs its own action_id to route that.
+MANAGE_ACTION_SELECT = "manage_action_select"
 REPORT_CALLBACK_ID = "control_report_submit"
 # The report-type select dispatches a block action (so the modal can reveal the
 # person picker for "history"); it needs its own action_id to route that event.
@@ -501,60 +504,108 @@ def _optional_text(block_id, label):
     }
 
 
-def build_manage_employees_modal():
-    """Add/edit (reuses the fields below) or delete an employee. The employee and
-    manager are picked by Slack user-picker, so member IDs are supplied directly.
-    Delete is block-and-tell: a manager with reports is rejected until reassigned."""
+_MANAGE_ACTIONS = [
+    {"text": {"type": "plain_text", "text": "Add / edit"}, "value": "save"},
+    {"text": {"type": "plain_text", "text": "Set allowance override"}, "value": "override"},
+    {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
+]
+
+
+def build_manage_employees_modal(action="save"):
+    """Add/edit, set an allowance override, or delete an employee. The Action select
+    dispatches a block action so the modal shows only the fields the chosen action
+    needs (re-rendered via views_update). Employee + Manager are Slack user-pickers,
+    so member IDs are supplied directly. Delete is block-and-tell: a person who still
+    manages anyone is rejected until reassigned."""
+    initial = next((o for o in _MANAGE_ACTIONS if o["value"] == action), _MANAGE_ACTIONS[0])
+    blocks = [
+        {
+            "type": "input",
+            "block_id": "employee",
+            "label": {"type": "plain_text", "text": "Employee"},
+            "element": {
+                "type": "users_select",
+                "action_id": "value",
+                "placeholder": {"type": "plain_text", "text": "Pick a person"},
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "action",
+            "dispatch_action": True,  # re-render the modal when the action changes
+            "label": {"type": "plain_text", "text": "Action"},
+            "element": {
+                "type": "static_select",
+                "action_id": MANAGE_ACTION_SELECT,
+                "initial_option": initial,
+                "options": _MANAGE_ACTIONS,
+            },
+        },
+    ]
+
+    if action == "save":
+        blocks += [
+            {
+                "type": "input",
+                "block_id": "name",
+                "label": {"type": "plain_text", "text": "Name"},
+                "element": {"type": "plain_text_input", "action_id": "value"},
+            },
+            {
+                "type": "input",
+                "block_id": "manager",
+                "label": {"type": "plain_text", "text": "Manager"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "The approver. Pick the person themselves if they're top of chain "
+                    "(their leave auto-approves).",
+                },
+                "element": {
+                    "type": "users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick the approver"},
+                },
+            },
+        ]
+    elif action == "override":
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Per-person allowance override. Leave all three blank to clear "
+                        "the override (fall back to the central policy).",
+                    }
+                ],
+            }
+        )
+        blocks += [
+            _optional_text("override_sick", "Sick override"),
+            _optional_text("override_vacation", "Vacation override"),
+            _optional_text("override_personal", "Personal override"),
+        ]
+    else:  # delete
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Permanently removes this employee. Blocked while they still "
+                        "manage anyone — reassign those reports first.",
+                    }
+                ],
+            }
+        )
+
     return {
         "type": "modal",
         "callback_id": MANAGE_EMPLOYEES_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Manage Employees"},
         "submit": {"type": "plain_text", "text": "Apply"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            {
-                "type": "input",
-                "block_id": "employee",
-                "label": {"type": "plain_text", "text": "Employee"},
-                "element": {
-                    "type": "users_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
-                },
-            },
-            {
-                "type": "input",
-                "block_id": "action",
-                "label": {"type": "plain_text", "text": "Action"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "value",
-                    "initial_option": {
-                        "text": {"type": "plain_text", "text": "Add / edit"},
-                        "value": "save",
-                    },
-                    "options": [
-                        {"text": {"type": "plain_text", "text": "Add / edit"}, "value": "save"},
-                        {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
-                    ],
-                },
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "Add / edit uses the fields below. Delete ignores them and is "
-                        "blocked while the person still manages anyone.",
-                    }
-                ],
-            },
-            _optional_text("name", "Name (add / edit)"),
-            _optional_user_select("manager", "Manager (add / edit)", "Pick a manager"),
-            _optional_text("override_sick", "Sick override (optional)"),
-            _optional_text("override_vacation", "Vacation override (optional)"),
-            _optional_text("override_personal", "Personal override (optional)"),
-        ],
+        "blocks": blocks,
     }
 
 

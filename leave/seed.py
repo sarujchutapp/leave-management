@@ -95,6 +95,23 @@ def delete_employee(db, slack_user_id):
     db.employees.delete_item(Key={"slack_user_id": slack_user_id})
 
 
+def set_allowance_override(db, slack_user_id, allowances):
+    """Set (or clear) a person's per-type allowance override without touching their
+    other fields. A falsy `allowances` removes the override so balances fall back to
+    the central policy."""
+    if allowances:
+        db.employees.update_item(
+            Key={"slack_user_id": slack_user_id},
+            UpdateExpression="SET allowances = :a",
+            ExpressionAttributeValues={":a": allowances},
+        )
+    else:
+        db.employees.update_item(
+            Key={"slack_user_id": slack_user_id},
+            UpdateExpression="REMOVE allowances",
+        )
+
+
 # Proxy employees for local testing. U_BOSS has no manager (top of chain).
 PROXY_EMPLOYEES = [
     ("U_EXAMPLE_OWNER", "Owner", None),

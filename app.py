@@ -31,6 +31,7 @@ from leave.blocks import (
     LEAVE_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
+    MANAGE_ACTION_SELECT,
     MANAGE_EMPLOYEES_ACTION,
     MANAGE_EMPLOYEES_CALLBACK_ID,
     REPORT_ACTION,
@@ -52,6 +53,7 @@ from leave.handlers import (
     open_leave_limits,
     open_leave_modal,
     open_manage_employees,
+    update_manage_modal,
     open_report,
     open_view_settings,
     update_report_modal,
@@ -196,6 +198,10 @@ def build_app(calendar=None, faas=False):
     @app.action(MANAGE_EMPLOYEES_ACTION)
     def _manage_employees(ack, body, client):
         open_manage_employees(ack, body, client, admin_ids)
+
+    @app.action(MANAGE_ACTION_SELECT)
+    def _manage_action_changed(ack, body, client):
+        update_manage_modal(ack, body, client, admin_ids)
 
     @app.action(REPORT_ACTION)
     def _report(ack, body, client):
