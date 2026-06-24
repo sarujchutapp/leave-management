@@ -668,7 +668,7 @@ def _report_view(report_type, person=None):
         "state": {
             "values": {
                 "report_type": {REPORT_TYPE_ACTION: {"selected_option": {"value": report_type}}},
-                "person": {"value": {"selected_user": person}},
+                "person": {"value": {"selected_option": {"value": person}}},
             }
         }
     }
@@ -681,7 +681,7 @@ def _block_ids(view):
 def test_report_modal_opens_with_picker_hidden(db):
     client = FakeSlackClient()
     ack = FakeAck()
-    open_report(ack=ack, body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
+    open_report(ack=ack, body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, db=db, admin_ids=ADMINS)
     view = client.views_push_calls[0]["view"]
     assert view["callback_id"] == REPORT_CALLBACK_ID
     ids = _block_ids(view)
@@ -689,24 +689,32 @@ def test_report_modal_opens_with_picker_hidden(db):
     assert "person" not in ids  # picker hidden until "history" is chosen
 
 
-def test_report_modal_reveals_and_hides_person_picker(db):
+def test_report_modal_reveals_and_hides_employee_picker(db):
+    upsert_employee(db, "U_A", "Alice", None)  # an employee to populate the dropdown
     client = FakeSlackClient()
-    # Selecting "history" updates the modal in place to show the person picker.
+    # Selecting "history" updates the modal in place to show the employee picker.
     update_report_modal(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
               "actions": [{"selected_option": {"value": "history"}}]},
         client=client,
+        db=db,
         admin_ids=ADMINS,
     )
     assert client.views_update_calls[0]["view_id"] == "V1"
-    assert "person" in _block_ids(client.views_update_calls[0]["view"])
+    person_block = next(
+        b for b in client.views_update_calls[0]["view"]["blocks"] if b.get("block_id") == "person"
+    )
+    # It's a dropdown of employees (not a Slack user-picker, so no bots can appear).
+    assert person_block["element"]["type"] == "static_select"
+    assert [o["value"] for o in person_block["element"]["options"]] == ["U_A"]
     # Switching back to "quota" hides it again.
     update_report_modal(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
               "actions": [{"selected_option": {"value": "quota"}}]},
         client=client,
+        db=db,
         admin_ids=ADMINS,
     )
     assert "person" not in _block_ids(client.views_update_calls[1]["view"])
@@ -758,7 +766,7 @@ def test_report_history_dms_that_persons_csv(db):
 
 def test_report_modal_offers_burnout_option(db):
     client = FakeSlackClient()
-    open_report(ack=FakeAck(), body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
+    open_report(ack=FakeAck(), body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, db=db, admin_ids=ADMINS)
     view = client.views_push_calls[0]["view"]
     block = next(b for b in view["blocks"] if b.get("block_id") == "report_type")
     values = {o["value"] for o in block["element"]["options"]}
@@ -880,6 +888,72 @@ def test_manage_add_creates_employee(db):
     assert emp["real_name"] == "Newbie"
     assert emp["manager_id"] == "U_BOSS"
     assert "allowances" not in emp  # add/edit no longer sets an override
+
+
+def test_manage_rejects_duplicate_name(db):
+    upsert_employee(db, "U_A", "Alice", "U_A")
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        # Case-insensitive clash with the existing "Alice".
+        view=_manage_view("U_B", action="save", name="alice", manager="U_BOSS"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "name" in ack.response["errors"]
+    assert get_employee(db, "U_B") is None  # nothing created
+
+
+def test_manage_edit_can_keep_own_name(db):
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name="Eve", manager="U_MGR2"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response == {"response_action": "clear"}  # own name is not a clash
+    assert get_employee(db, "U_E")["manager_id"] == "U_MGR2"
+
+
+def test_manage_rejects_bot_as_employee(db):
+    client = FakeSlackClient()
+    client.bot_users = {"U_APP"}  # the leave-management app / Slackbot
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_APP", action="save", name="Some App", manager="U_BOSS"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "employee" in ack.response["errors"]
+    assert get_employee(db, "U_APP") is None
+
+
+def test_manage_rejects_bot_as_manager(db):
+    client = FakeSlackClient()
+    client.bot_users = {"U_APP"}
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_NEW", action="save", name="Newbie2", manager="U_APP"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "manager" in ack.response["errors"]
+    assert get_employee(db, "U_NEW") is None
 
 
 def test_manage_save_requires_a_manager(db):

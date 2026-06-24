@@ -609,11 +609,13 @@ def build_manage_employees_modal(action="save"):
     }
 
 
-def build_report_modal(report_type="quota"):
-    """Pick which report to send: all-employee quota, or one person's full leave
-    history. The person picker is only shown once "history" is chosen — the
-    report-type select dispatches a block action that re-renders this modal with
-    `report_type` flipped. The CSV is DMed to the requesting admin."""
+def build_report_modal(report_type="quota", employees=None):
+    """Pick which report to send: all-employee quota, one person's full leave
+    history, or team burnout risk. The person picker is only shown once "history"
+    is chosen — the report-type select dispatches a block action that re-renders
+    this modal. The person picker is a dropdown of *registered employees* (so it
+    can't list bots/apps the way a Slack user-picker would). The CSV is DMed to
+    the requesting admin."""
     options = [
         {"text": {"type": "plain_text", "text": "All-employee quota"}, "value": "quota"},
         {"text": {"type": "plain_text", "text": "One person's leave history"}, "value": "history"},
@@ -635,18 +637,39 @@ def build_report_modal(report_type="quota"):
         },
     ]
     if report_type == "history":
-        blocks.append(
-            {
-                "type": "input",
-                "block_id": "person",
-                "label": {"type": "plain_text", "text": "Person"},
-                "element": {
-                    "type": "users_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick a person"},
-                },
-            }
-        )
+        people = sorted(employees or [], key=lambda e: e.get("real_name", ""))
+        if people:
+            blocks.append(
+                {
+                    "type": "input",
+                    "block_id": "person",
+                    "label": {"type": "plain_text", "text": "Person"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "value",
+                        "placeholder": {"type": "plain_text", "text": "Pick an employee"},
+                        "options": [
+                            {
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": (p.get("real_name") or p["slack_user_id"])[:75],
+                                },
+                                "value": p["slack_user_id"],
+                            }
+                            for p in people
+                        ],
+                    },
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": "No registered employees yet."}
+                    ],
+                }
+            )
     return {
         "type": "modal",
         "callback_id": REPORT_CALLBACK_ID,

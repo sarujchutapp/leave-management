@@ -30,7 +30,7 @@ from leave.blocks import (
 )
 from leave.board import update_board
 from leave.calendar_client import color_id_for
-from leave.db import get_employee, list_reports
+from leave.db import employee_with_name, get_employee, list_employees, list_reports
 from leave.policy import get_policy, set_policy
 from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.seed import delete_employee, set_allowance_override, upsert_employee
@@ -285,29 +285,37 @@ def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today
         submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today)
 
 
-def open_report(ack, body, client, admin_ids):
+def open_report(ack, body, client, db, admin_ids):
     """Report button: re-checks admin, then pushes the report-type modal (quota by
-    default — the person picker only appears once 'history' is selected)."""
+    default — the person picker, a dropdown of registered employees, only appears
+    once 'history' is selected)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
-    client.views_push(trigger_id=body["trigger_id"], view=build_report_modal())
+    client.views_push(
+        trigger_id=body["trigger_id"],
+        view=build_report_modal(employees=list_employees(db)),
+    )
 
 
-def update_report_modal(ack, body, client, admin_ids):
-    """Report-type select changed: re-render the modal so the person picker shows
+def update_report_modal(ack, body, client, db, admin_ids):
+    """Report-type select changed: re-render the modal so the employee dropdown shows
     only for 'history'. Updates in place by view_id (no new modal)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     report_type = body["actions"][0]["selected_option"]["value"]
-    client.views_update(view_id=body["view"]["id"], view=build_report_modal(report_type))
+    client.views_update(
+        view_id=body["view"]["id"],
+        view=build_report_modal(report_type, employees=list_employees(db)),
+    )
 
 
 def _report_choice(view):
     values = view["state"]["values"]
     report_type = values["report_type"][REPORT_TYPE_ACTION]["selected_option"]["value"]
-    person = values.get("person", {}).get("value", {}).get("selected_user")
+    # The person picker is a dropdown of employees, so the value is selected_option.
+    person = values.get("person", {}).get("value", {}).get("selected_option", {}).get("value")
     return report_type, person
 
 
@@ -425,6 +433,14 @@ def _manage_action(values):
     return values.get("action", {}).get(MANAGE_ACTION_SELECT, {}).get("selected_option", {}).get("value")
 
 
+def _is_bot(client, user_id):
+    """True if the Slack user is an app/bot (or Slackbot). A Slack user-picker always
+    lists apps/bots and can't filter them out, so we reject one on submit instead.
+    Needs the users:read scope."""
+    info = client.users_info(user=user_id).get("user", {})
+    return bool(info.get("is_bot") or info.get("is_app_user")) or user_id == "USLACKBOT"
+
+
 def submit_manage_employees(ack, body, view, client, db, admin_ids):
     """Add/edit, set an allowance override, or delete an employee, per the chosen
     Action. Delete is block-and-tell: if the target still manages anyone, the submit
@@ -472,8 +488,19 @@ def submit_manage_employees(ack, body, view, client, db, admin_ids):
         errors["name"] = "Name is required."
     if not manager:
         errors["manager"] = "Pick a manager — the person themselves if they're top of chain."
+    # Names appear on manager approval tickets, so keep them unique across employees.
+    if name and employee_with_name(db, name, exclude_id=target):
+        errors["name"] = "That name is already used by another employee — pick a distinct name."
     if errors:
         ack(response_action="errors", errors=errors)
+        return
+    # The user-picker always lists the app/Slackbot; block adding one as an employee
+    # or manager (Slack gives no way to hide them from the picker itself).
+    if _is_bot(client, target):
+        ack(response_action="errors", errors={"employee": "Pick a real person — that's an app/bot."})
+        return
+    if manager != target and _is_bot(client, manager):
+        ack(response_action="errors", errors={"manager": "Pick a real person — that's an app/bot."})
         return
     ack(response_action="clear")  # close the whole modal stack on success
     upsert_employee(db, target, name, manager, allowances=None)
