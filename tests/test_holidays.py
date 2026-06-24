@@ -8,12 +8,9 @@ from leave.seed import upsert_employee
 from leave.validation import validate_request
 
 
-def test_holidays_degrade_to_empty_when_table_missing(db):
-    # Proxy/not-yet-provisioned mode: an unreachable holidays table -> "no holidays",
-    # not an error, so balances/validation/board keep working.
-    import boto3
-
-    db.holidays = boto3.resource("dynamodb").Table("leave_holidays_does_not_exist")
+def test_no_holidays_set_yet_is_empty(db):
+    # Before any holiday is added, the reserved __holidays__ item doesn't exist, so
+    # the system simply runs holiday-free — not an error.
     assert holidays_for_year(db, 2026) == set()
     assert holidays_between(db, date(2026, 1, 1), date(2026, 12, 31)) == set()
 

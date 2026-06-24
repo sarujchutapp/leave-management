@@ -37,6 +37,8 @@ CARRY_OVER_ACTION = "control_carry_over"
 CLEAR_ACTION = "control_clear"
 REPORT_ACTION = "control_report"
 MANAGE_EMPLOYEES_ACTION = "control_manage_employees"
+HOLIDAYS_CALLBACK_ID = "control_holidays_submit"
+HOLIDAYS_ACTION = "control_holidays"
 
 
 def format_period(start, end, half=None):
@@ -382,11 +384,71 @@ def build_cancel_modal(rows):
 _CONTROL_BUTTONS = [
     (LEAVE_LIMITS_ACTION, "Leave limits"),
     (CARRY_OVER_ACTION, "Carry-over"),
+    (HOLIDAYS_ACTION, "Holidays"),
     (CLEAR_ACTION, "Clear"),
     (REPORT_ACTION, "Report"),
     (MANAGE_EMPLOYEES_ACTION, "Manage employees"),
     (VIEW_SETTINGS_ACTION, "View settings"),
 ]
+
+
+def build_holidays_modal(holidays):
+    """Admin holidays modal: add a holiday (date + label), or remove an existing
+    one. All inputs are optional; the submit applies a remove if one is picked,
+    otherwise an add. `holidays` is a list of (date, label, event_id) for the
+    remove dropdown (omitted when there are none yet)."""
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Add* a holiday (date + label), or *remove* one below.",
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "holiday_date",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "Date"},
+            "element": {"type": "datepicker", "action_id": "value"},
+        },
+        {
+            "type": "input",
+            "block_id": "holiday_label",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "Label"},
+            "element": {"type": "plain_text_input", "action_id": "value"},
+        },
+    ]
+    if holidays:
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": "holiday_remove",
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Remove a holiday"},
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick one to remove"},
+                    "options": [
+                        {
+                            "text": {"type": "plain_text", "text": f"{d.isoformat()} — {label}"[:75]},
+                            "value": d.isoformat(),
+                        }
+                        for d, label, _ in holidays
+                    ],
+                },
+            }
+        )
+    return {
+        "type": "modal",
+        "callback_id": HOLIDAYS_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Holidays"},
+        "submit": {"type": "plain_text", "text": "Save"},
+        "close": {"type": "plain_text", "text": "Back"},
+        "blocks": blocks,
+    }
 
 
 def build_control_menu():

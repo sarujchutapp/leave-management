@@ -32,12 +32,6 @@ variable "by_employee_index" {
   default     = "by_employee"
 }
 
-variable "holidays_table" {
-  type        = string
-  description = "DynamoDB holidays table name (partition year, sort holiday_date)."
-  default     = "leave_holidays"
-}
-
 variable "leave_board_channel" {
   type        = string
   description = "Slack channel ID for the leave-board update messages. Empty disables the board (invite the bot to this channel)."

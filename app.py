@@ -26,6 +26,8 @@ from leave.blocks import (
     CARRY_OVER_CALLBACK_ID,
     CLEAR_ACTION,
     CLEAR_CALLBACK_ID,
+    HOLIDAYS_ACTION,
+    HOLIDAYS_CALLBACK_ID,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
     LEAVE_CALLBACK_ID,
@@ -47,6 +49,7 @@ from leave.handlers import (
     open_book_modal,
     open_cancel_modal,
     open_group_picker,
+    open_holidays,
     open_carry_over,
     open_clear,
     open_control_menu,
@@ -66,6 +69,9 @@ from leave.handlers import (
     submit_clear_apply,
     submit_group_break,
     submit_group_break_apply,
+    submit_holidays,
+    submit_holidays_ack,
+    submit_holidays_apply,
     submit_leave,
     submit_leave_ack,
     submit_leave_apply,
@@ -199,6 +205,11 @@ def build_app(calendar=None, faas=False):
     def _manage_employees(ack, body, client):
         open_manage_employees(ack, body, client, admin_ids)
 
+    @app.action(HOLIDAYS_ACTION)
+    def _holidays(ack, body, client):
+        with db.connect() as d:
+            open_holidays(ack, body, client, d, admin_ids)
+
     @app.action(MANAGE_ACTION_SELECT)
     def _manage_action_changed(ack, body, client):
         update_manage_modal(ack, body, client, admin_ids)
@@ -292,6 +303,17 @@ def build_app(calendar=None, faas=False):
 
         app.view(CLEAR_CALLBACK_ID)(ack=_clear_ack, lazy=[_clear_lazy])
 
+        # Holidays submit: validate in the ack phase, then mirror the calendar +
+        # store the change post-ack (the Google Calendar call is the slow part).
+        def _holidays_ack(ack, body, view):
+            submit_holidays_ack(ack, body, view, admin_ids)
+
+        def _holidays_lazy(body, view, client):
+            with db.connect() as d:
+                submit_holidays_apply(body, view, d, get_calendar(), client, admin_ids)
+
+        app.view(HOLIDAYS_CALLBACK_ID)(ack=_holidays_ack, lazy=[_holidays_lazy])
+
         # Group-break submit: ack closes the picker, then the multi-person search
         # + DM run post-ack so the ack stays under 3s for larger groups.
         def _group_break_lazy(body, view, client):
@@ -330,6 +352,11 @@ def build_app(calendar=None, faas=False):
         def _group_break_submit(ack, body, view, client):
             with db.connect() as d:
                 submit_group_break(ack, body, view, client, d)
+
+        @app.view(HOLIDAYS_CALLBACK_ID)
+        def _holidays_submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_holidays(ack, body, view, d, get_calendar(), client, admin_ids)
 
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):

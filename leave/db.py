@@ -6,19 +6,19 @@ import boto3
 
 EMPLOYEES_TABLE = os.environ.get("EMPLOYEES_TABLE", "leave_employees")
 REQUESTS_TABLE = os.environ.get("REQUESTS_TABLE", "leave_requests")
-HOLIDAYS_TABLE = os.environ.get("HOLIDAYS_TABLE", "leave_holidays")
 BY_EMPLOYEE_INDEX = "by_employee"
 
 
 class Db:
     """Handle holding the DynamoDB Table resources and the GSI name, threaded
     everywhere the old SQL connection went. Doubles as a no-op context manager
-    so `with db.connect() as db:` reads the same as before."""
+    so `with db.connect() as db:` reads the same as before. Holidays live as a
+    reserved item in the employees table (see leave/holidays.py), so there is no
+    separate holidays handle."""
 
-    def __init__(self, employees, requests, holidays, by_employee_index=BY_EMPLOYEE_INDEX):
+    def __init__(self, employees, requests, by_employee_index=BY_EMPLOYEE_INDEX):
         self.employees = employees
         self.requests = requests
-        self.holidays = holidays
         self.by_employee_index = by_employee_index
 
     def __enter__(self):
@@ -35,7 +35,6 @@ def connect():
     return Db(
         dynamodb.Table(EMPLOYEES_TABLE),
         dynamodb.Table(REQUESTS_TABLE),
-        dynamodb.Table(HOLIDAYS_TABLE),
     )
 
 

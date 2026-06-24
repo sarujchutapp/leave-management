@@ -61,13 +61,10 @@ resource "aws_dynamodb_table" "requests" {
   }
 }
 
-# NOTE: the `holidays` table is deferred — creating it needs dynamodb:CreateTable on
-# leave_holidays, which the deploy role doesn't have (an admin must widen it, see
-# terraform/operator-policy.json). Until then the app degrades to "no holidays"
-# (leave/holidays.py catches the missing table/permission). To enable holidays later:
-# (1) admin adds the leave_holidays ARN to the deploy role's policy,
-# (2) restore this aws_dynamodb_table.holidays block + the HolidaysRead IAM statement,
-# (3) terraform apply, then run import_holidays.py.
+# NOTE: there is no holidays table. Holidays are a single reserved `__holidays__`
+# item in the employees table (see ADR-0006 / leave/holidays.py), so they need no
+# extra table or `dynamodb:CreateTable` grant — the existing employees read/write
+# covers them.
 
 # --- IAM (least privilege) -----------------------------------------------------
 data "aws_iam_policy_document" "assume_role" {
@@ -196,7 +193,6 @@ resource "aws_lambda_function" "leave_bot" {
     variables = {
       EMPLOYEES_TABLE              = var.employees_table
       REQUESTS_TABLE               = var.requests_table
-      HOLIDAYS_TABLE               = var.holidays_table
       LEAVE_BOARD_CHANNEL          = var.leave_board_channel
       LEAVE_SHEET_ID               = var.leave_sheet_id
       SLACK_ADMIN_IDS              = var.slack_admin_ids

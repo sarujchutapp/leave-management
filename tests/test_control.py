@@ -6,6 +6,7 @@ from leave.blocks import (
     CARRY_OVER_CALLBACK_ID,
     CLEAR_CALLBACK_ID,
     CONTROL_MENU_CALLBACK_ID,
+    HOLIDAYS_CALLBACK_ID,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_ACTION_SELECT,
@@ -24,19 +25,21 @@ from leave.handlers import (
     open_carry_over,
     open_clear,
     open_control_menu,
+    open_holidays,
     open_leave_limits,
     open_manage_employees,
     open_report,
     open_view_settings,
     submit_carry_over,
     submit_clear,
+    submit_holidays,
     submit_leave_limits,
     submit_manage_employees,
     submit_report,
     update_manage_modal,
     update_report_modal,
 )
-from leave.holidays import holidays_for_year, upsert_holiday
+from leave.holidays import get_holiday, holidays_for_year, upsert_holiday
 from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.policy import POLICY_KEY, get_policy, set_policy
 from leave.requests import (
@@ -1104,6 +1107,104 @@ def test_manage_delete_after_reassigning_reports_succeeds(db):
     )
     assert ack.response == {"response_action": "clear"}
     assert get_employee(db, "U_M") is None
+
+
+def _holidays_view(holiday_date=None, label=None, remove=None):
+    """A view_submission state payload matching build_holidays_modal."""
+    return {
+        "state": {
+            "values": {
+                "holiday_date": {"value": {"selected_date": holiday_date}},
+                "holiday_label": {"value": {"value": label}},
+                "holiday_remove": {
+                    "value": {"selected_option": {"value": remove}} if remove else {}
+                },
+            }
+        }
+    }
+
+
+def test_holidays_modal_opens_for_admin(db):
+    upsert_holiday(db, date(2026, 4, 13), "Songkran")
+    client = FakeSlackClient()
+    open_holidays(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_push_calls[0]["view"]
+    assert view["callback_id"] == HOLIDAYS_CALLBACK_ID
+    ids = {b.get("block_id") for b in view["blocks"]}
+    assert {"holiday_date", "holiday_label", "holiday_remove"} <= ids  # remove shown (one exists)
+
+
+def test_holidays_add_creates_event_and_stores(db):
+    cal = FakeCalendar()
+    ack = FakeAck()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(holiday_date="2026-04-13", label="Songkran"),
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert ack.response == {"response_action": "clear"}
+    assert holidays_for_year(db, 2026) == {date(2026, 4, 13)}
+    assert get_holiday(db, date(2026, 4, 13))["calendar_event_id"] == cal.created[0]["id"]
+    assert "Songkran" in cal.created[0]["summary"]
+
+
+def test_holidays_remove_deletes_event_and_entry(db):
+    cal = FakeCalendar()
+    upsert_holiday(db, date(2026, 4, 13), "Songkran", calendar_event_id="evt9")
+    submit_holidays(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(remove="2026-04-13"),
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert holidays_for_year(db, 2026) == set()
+    assert cal.deleted == ["evt9"]
+
+
+def test_holidays_add_requires_date_and_label(db):
+    cal = FakeCalendar()
+    ack = FakeAck()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(holiday_date="2026-04-13"),  # label missing
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "holiday_label" in ack.response["errors"]
+    assert holidays_for_year(db, 2026) == set()
+    assert cal.created == []
+
+
+def test_holidays_non_admin_submit_rejected(db):
+    cal = FakeCalendar()
+    submit_holidays(
+        ack=FakeAck(),
+        body={"user": {"id": "U_OTHER"}},
+        view=_holidays_view(holiday_date="2026-04-13", label="Songkran"),
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert holidays_for_year(db, 2026) == set()
+    assert cal.created == []
 
 
 def test_manage_non_admin_submit_rejected(db):

@@ -18,6 +18,7 @@ from leave.blocks import (
     build_carry_over_modal,
     build_clear_modal,
     build_control_menu,
+    build_holidays_modal,
     build_decision_notice,
     build_decline_modal,
     build_leave_limits_modal,
@@ -35,7 +36,7 @@ from leave.policy import get_policy, set_policy
 from leave.report import build_burnout_csv, build_history_csv, build_report_csv
 from leave.seed import delete_employee, set_allowance_override, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
-from leave.holidays import holidays_for_year
+from leave.holidays import all_holidays, apply_holidays, delete_holiday, holidays_for_year
 from leave.optimizer import Member, group_break, top_breaks
 from leave.requests import (
     active_full_leave_ranges,
@@ -283,6 +284,73 @@ def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today
     """Synchronous submit (Socket Mode / tests): ack-with-confirmation, then wipe."""
     if submit_clear_ack(ack, body, view, admin_ids):
         submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today)
+
+
+def open_holidays(ack, body, client, db, admin_ids):
+    """Holidays button: re-checks admin, then pushes the add/remove modal, the
+    remove dropdown pre-filled with the current holidays."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    client.views_push(
+        trigger_id=body["trigger_id"], view=build_holidays_modal(all_holidays(db))
+    )
+
+
+def _parse_holiday_submission(view):
+    """(date_or_None, label_or_None, remove_iso_or_None) from the holidays modal."""
+    values = view["state"]["values"]
+    date_raw = values.get("holiday_date", {}).get("value", {}).get("selected_date")
+    d = _to_gregorian(date.fromisoformat(date_raw)) if date_raw else None
+    label = (values.get("holiday_label", {}).get("value", {}).get("value") or "").strip() or None
+    remove_opt = values.get("holiday_remove", {}).get("value", {}).get("selected_option")
+    remove = remove_opt.get("value") if remove_opt else None
+    return d, label, remove
+
+
+def submit_holidays_ack(ack, body, view, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate that exactly one action is
+    specified — a holiday to remove, or a date + label to add. Returns True when
+    valid so the caller runs the calendar+store change post-ack."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return False
+    d, label, remove = _parse_holiday_submission(view)
+    if remove or (d and label):
+        ack(response_action="clear")  # close the whole modal stack on success
+        return True
+    if d and not label:
+        errors = {"holiday_label": "Add a label for the holiday."}
+    elif label and not d:
+        errors = {"holiday_date": "Pick the holiday's date."}
+    else:
+        errors = {"holiday_date": "Pick a holiday to remove, or enter a date and label to add."}
+    ack(response_action="errors", errors=errors)
+    return False
+
+
+def submit_holidays_apply(body, view, db, calendar, client, admin_ids):
+    """Post-ack work: apply the add (create/update the calendar event + store) or
+    the remove (delete the event + entry), then DM the admin. Re-checks admin +
+    validity because Lambda lazy listeners fire regardless of the ack result."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    d, label, remove = _parse_holiday_submission(view)
+    user_id = body["user"]["id"]
+    if remove:
+        removed = delete_holiday(db, date.fromisoformat(remove))
+        if removed and removed.get("calendar_event_id"):
+            calendar.delete_event(removed["calendar_event_id"])
+        _notify(client, user_id, f"🗑️ Removed holiday {remove}.")
+    elif d and label:
+        apply_holidays(db, calendar, [(d, label)])
+        _notify(client, user_id, f"✅ Saved holiday {d.isoformat()} — {label}.")
+
+
+def submit_holidays(ack, body, view, db, calendar, client, admin_ids):
+    """Synchronous submit (Socket Mode / tests): ack-with-validation, then apply."""
+    if submit_holidays_ack(ack, body, view, admin_ids):
+        submit_holidays_apply(body, view, db, calendar, client, admin_ids)
 
 
 def open_report(ack, body, client, db, admin_ids):
