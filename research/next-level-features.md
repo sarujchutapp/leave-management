@@ -135,6 +135,15 @@ model. Also a prerequisite stepping-stone toward Pillar 3's capacity concept.
 
 # Parked (revisit later)
 
+- **Slack App Home tab as the product surface** — a persistent, scrollable Home tab (the
+  Slack analog of Timetastic's Insights *page*) that could host the Burnout Board, the
+  Leave Board, and a calendar view in one place, opened anytime from the bot — no slash
+  command, no `trigger_id`/3s limit, rebuilt on demand. *Why parked now:* requires the
+  Events API (`app_home_opened`) + a `views_publish` flow, which this bot deliberately
+  avoids today (slash commands + interactivity only — see SETUP.md / ADR-0002); adopting
+  it is an architectural step (new subscription + scopes, likely an ADR). *Upgrade path:*
+  App Home views are Block Kit, so the per-feature block builders (e.g. the burnout board
+  rows) transfer directly — the interim **modal** rendering is not throwaway.
 - **AI-native / natural-language** requests + conversational balance assistant — the "final
   version." Deliberately deterministic until then.
 - **Reverse optimizer (goal → dates)** — "I want a 9-day trip in October" → min-quota date

@@ -12,7 +12,8 @@ from leave.blocks import (
     MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
     build_advance_blocks,
-    build_burnout_board_blocks,
+    build_burnout_board_modal,
+    build_burnout_loading_modal,
     build_cancel_modal,
     build_group_picker_modal,
     build_group_result_blocks,
@@ -29,6 +30,7 @@ from leave.blocks import (
     build_settings_view,
     build_ticket,
     format_period,
+    mark_row_nudged,
 )
 from leave.board import update_board
 from leave.calendar_client import color_id_for
@@ -718,40 +720,61 @@ def _direct_reports(db, manager_id):
     return [r for r in list_reports(db, manager_id) if r["slack_user_id"] != manager_id]
 
 
-def open_burnout_ack(ack, body, db):
+def _board_external_id(body):
+    """A deterministic handle for the board modal so the post-ack views_update finds
+    the loading view opened in the ack window (the trigger_id is unique per click)."""
+    return f"burnout-{body['trigger_id']}"
+
+
+def open_burnout_ack(ack, body, client, db):
     """`/burnout` ack phase (under 3s): a quick manager gate via one employees scan.
-    A caller who manages no one gets a clear note here; a manager gets a brief
-    acknowledgement and the board is built + DMed post-ack (it reads several
-    records, so it can't run in the ack window — like the /control report)."""
+    A caller who manages no one gets a clear note; a manager gets an instant loading
+    modal on the trigger_id, filled in post-ack (the board reads several records,
+    past Slack's 3s window — so it can't be built here)."""
     if not _direct_reports(db, body["user_id"]):
         ack(NOT_A_MANAGER)
         return
-    ack("🔍 Building your burnout board…")
+    ack()
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=build_burnout_loading_modal(_board_external_id(body)),
+    )
 
 
 def open_burnout_apply(body, db, client, today=None):
-    """Post-ack work: rank the caller's direct reports by burnout risk and DM them
-    the board. Scoped strictly to the caller's own reports (the privacy guardrail);
-    re-reads them because Lambda lazy listeners fire regardless of the ack result,
-    so a caller who manages no one posts nothing (they already saw the note)."""
+    """Post-ack work: rank the caller's direct reports by burnout risk and swap the
+    loading modal for the board (by the external_id opened in the ack). Scoped
+    strictly to the caller's own reports (the privacy guardrail); re-reads them
+    because Lambda lazy listeners fire regardless of the ack, so a caller who manages
+    no one updates nothing (they opened no modal)."""
     today = today or date.today()
-    caller_id = body["user_id"]
-    reports = _direct_reports(db, caller_id)
+    reports = _direct_reports(db, body["user_id"])
     if not reports:
         return
     signals = ranked_burnout_signals(db, reports, today)
-    client.chat_postMessage(
-        channel=caller_id,
-        text="Burnout board — your direct reports ranked by burnout risk",
-        blocks=build_burnout_board_blocks(signals),
+    external_id = _board_external_id(body)
+    client.views_update(
+        external_id=external_id,
+        view=build_burnout_board_modal(signals, external_id),
     )
 
 
 def open_burnout(ack, body, db, client, today=None):
-    """Synchronous `/burnout` (Socket Mode / tests): manager-gate-and-ack, then
-    build + DM the board."""
-    open_burnout_ack(ack, body, db)
+    """Synchronous `/burnout` (Socket Mode / tests): manager-gate-and-ack (opening
+    the loading modal), then build + update the board."""
+    open_burnout_ack(ack, body, client, db)
     open_burnout_apply(body, db, client, today)
+
+
+def refresh_burnout(ack, body, client, db, today=None):
+    """`/burnout` Refresh button: rebuild the board in place (it's a live snapshot).
+    Acks at once, then re-reads the caller's direct reports and updates the open
+    modal by its view id — post-ack, like opening it."""
+    ack()
+    today = today or date.today()
+    reports = _direct_reports(db, body["user"]["id"])
+    signals = ranked_burnout_signals(db, reports, today) if reports else []
+    client.views_update(view_id=body["view"]["id"], view=build_burnout_board_modal(signals))
 
 
 def _nudge_message(stretch, expiring):
@@ -774,14 +797,15 @@ def _nudge_message(stretch, expiring):
 def handle_nudge(ack, body, client):
     """`/burnout` Nudge button: the bot DMs the at-risk report a supportive,
     wellbeing-framed message citing the reason the manager saw (carried in the
-    button value), then confirms to the manager. Bot-voiced — it never impersonates
-    the manager — and it books or modifies nothing. The DM is sent post-ack like
-    other slow handler work, so the click acks at once."""
+    button value), then flips that row's button to '✓ Nudged' in the board modal as
+    the manager's confirmation. Bot-voiced — it never impersonates the manager — and
+    it books or modifies nothing. Sent post-ack, so the click acks at once."""
     ack()
-    payload = json.loads(body["actions"][0]["value"])
-    target = payload["user_id"]
-    _notify(client, target, _nudge_message(payload["stretch"], payload.get("expiring", 0)))
-    _notify(client, body["user"]["id"], f"✅ Sent a wellbeing nudge to <@{target}>.")
+    value = body["actions"][0]["value"]
+    payload = json.loads(value)
+    _notify(client, payload["user_id"], _nudge_message(payload["stretch"], payload.get("expiring", 0)))
+    view = body["view"]
+    client.views_update(view_id=view["id"], view=mark_row_nudged(view, value))
 
 
 def _to_gregorian(d):

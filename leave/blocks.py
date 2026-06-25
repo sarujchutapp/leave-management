@@ -11,7 +11,13 @@ ADVANCE_BOOK_ACTION = "advance_book"
 # /advance "Plan a group break" button -> the people-picker modal (group-break finder).
 GROUP_PICK_ACTION = "advance_group_pick"
 GROUP_CALLBACK_ID = "advance_group_submit"
-# /burnout "Nudge" button: the bot DMs the at-risk report a supportive wellbeing
+# /burnout board is rendered as a modal (scrolls within a bounded window, unlike a
+# long DM). The board reads several records, so it opens a loading modal in the ack
+# window and is filled in post-ack via views_update keyed by external_id.
+BURNOUT_VIEW_CALLBACK_ID = "burnout_board"
+# Refresh button: rebuilds the board in place (it's a live snapshot).
+BURNOUT_REFRESH_ACTION = "burnout_refresh"
+# "Nudge" button on a row: the bot DMs the at-risk report a supportive wellbeing
 # message. The button value is a JSON blob of the row the manager saw (target,
 # name, stretch, expiring) so the DM cites that reason without a re-read.
 NUDGE_ACTION = "burnout_nudge"
@@ -217,53 +223,147 @@ def build_advance_blocks(breaks):
     return blocks
 
 
-def build_burnout_board_blocks(signals):
-    """/burnout board reply blocks: a header plus one section per direct report,
-    ranked by no-break stretch (longest first). Each row spells out the explainable
-    flags — days since last leave, remaining vacation vs days left in the year, and
-    longest working stretch — never an opaque score. `signals` is non-empty."""
-    blocks = [
+def _risk_dot(stretch):
+    """A quick-scan risk band keyed purely to the no-break stretch (the primary
+    burnout measure). The exact day counts stay on the row, so the dot is a visual
+    aid, not an opaque score — and the legend spells the thresholds out. 🔴 90+
+    days since last leave (~3 months), 🟠 45+, 🟢 under 45."""
+    if stretch >= 90:
+        return "🔴"
+    if stretch >= 45:
+        return "🟠"
+    return "🟢"
+
+
+# Cap rows so the view stays under Slack's 100-block ceiling (2 blocks/row + a
+# handful of fixed blocks). Far above any real manager's direct-report count.
+_BURNOUT_MAX_ROWS = 45
+
+
+def _burnout_modal_view(blocks, external_id=None):
+    """The /burnout board modal shell. `external_id`, when set, lets the post-ack
+    views_update find the loading view opened in the ack window."""
+    view = {
+        "type": "modal",
+        "callback_id": BURNOUT_VIEW_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "🔥 Burnout Board"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
+    }
+    if external_id:
+        view["external_id"] = external_id
+    return view
+
+
+def build_burnout_loading_modal(external_id):
+    """The instant placeholder opened on the trigger_id while the board is built
+    post-ack (the build reads several records, past Slack's 3s ack window)."""
+    return _burnout_modal_view(
+        [{"type": "section", "text": {"type": "mrkdwn", "text": "⏳ Building your burnout board…"}}],
+        external_id,
+    )
+
+
+def _burnout_row_blocks(rank, s):
+    """One ranked report: a name row (rank, risk dot, Nudge button) over a grid of
+    the explainable flags. Never an opaque score — the dot only bands the visible
+    no-break stretch, and the day counts sit right beside it."""
+    expiring = f"⚠️ {s.expiring} days expiring Dec 31" if s.expiring else "✓ Nothing this year"
+    return [
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "🔥 *Burnout board* — your direct reports, most at risk first:",
+            "text": {"type": "mrkdwn", "text": f"{_risk_dot(s.stretch)}  *#{rank} · {s.name}*"},
+            "accessory": {
+                "type": "button",
+                "action_id": NUDGE_ACTION,
+                "text": {"type": "plain_text", "text": "🌿 Nudge"},
+                "value": json.dumps(
+                    {"user_id": s.user_id, "name": s.name, "stretch": s.stretch, "expiring": s.expiring}
+                ),
             },
-        }
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Days since last leave*\n{s.stretch}"},
+                {"type": "mrkdwn", "text": f"*Longest working stretch*\n{s.working} days"},
+                {"type": "mrkdwn", "text": f"*Vacation left*\n{s.remaining} days"},
+                {"type": "mrkdwn", "text": f"*Days left in year*\n{s.days_left}"},
+                {"type": "mrkdwn", "text": f"*Expiring at year-end*\n{expiring}"},
+            ],
+        },
     ]
-    for s in signals:
-        expiring = (
-            f"⚠️ {s.expiring} vacation days expiring Dec 31"
-            if s.expiring
-            else "no vacation expiring this year"
-        )
-        line = (
-            f"*{s.name}*\n"
-            f"• {s.stretch} days since last leave\n"
-            f"• {s.remaining} vacation days left · {s.days_left} days left in the year\n"
-            f"• longest working stretch: {s.working} days\n"
-            f"• {expiring}"
-        )
+
+
+def build_burnout_board_modal(signals, external_id=None):
+    """The filled /burnout board: one ranked card per direct report (most at risk
+    first), a risk legend, and a Refresh button. `signals` may be empty (a manager
+    whose reports all left since the board opened) — then it says so plainly."""
+    if not signals:
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "You don't manage anyone right now."}}
+        ]
+        return _burnout_modal_view(blocks, external_id)
+    blocks = [
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": "Your direct reports, ranked by burnout risk — most at risk first."}
+            ],
+        },
+        {"type": "divider"},
+    ]
+    for rank, s in enumerate(signals[:_BURNOUT_MAX_ROWS], 1):
+        blocks += _burnout_row_blocks(rank, s)
+    if len(signals) > _BURNOUT_MAX_ROWS:
         blocks.append(
             {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": line},
-                "accessory": {
-                    "type": "button",
-                    "action_id": NUDGE_ACTION,
-                    "text": {"type": "plain_text", "text": "Nudge"},
-                    "value": json.dumps(
-                        {
-                            "user_id": s.user_id,
-                            "name": s.name,
-                            "stretch": s.stretch,
-                            "expiring": s.expiring,
-                        }
-                    ),
-                },
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"Showing the {_BURNOUT_MAX_ROWS} most at risk of {len(signals)}."}
+                ],
             }
         )
-    return blocks
+    blocks.append({"type": "divider"})
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": "Risk: 🔴 90+ days since last leave · 🟠 45+ · 🟢 under 45"}
+            ],
+        }
+    )
+    blocks.append(
+        {
+            "type": "actions",
+            "block_id": "burnout_refresh",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": BURNOUT_REFRESH_ACTION,
+                    "text": {"type": "plain_text", "text": "🔄 Refresh"},
+                    "value": "refresh",
+                }
+            ],
+        }
+    )
+    return _burnout_modal_view(blocks, external_id)
+
+
+def mark_row_nudged(view, value):
+    """The manager's in-place confirmation: flip the Nudge button matching `value`
+    to a '✓ Nudged' label on its row, returning the updated modal view for
+    views_update. (A nudge persists nothing, so this lives only in the view.)"""
+    blocks = []
+    for b in view["blocks"]:
+        acc = b.get("accessory")
+        if acc and acc.get("action_id") == NUDGE_ACTION and acc.get("value") == value:
+            b = {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": b["text"]["text"] + "   ·   ✓ _Nudged_"},
+            }
+        blocks.append(b)
+    return _burnout_modal_view(blocks, view.get("external_id"))
 
 
 def build_group_result_blocks(window, text):

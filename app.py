@@ -34,6 +34,7 @@ from leave.blocks import (
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_ACTION_SELECT,
+    BURNOUT_REFRESH_ACTION,
     MANAGE_EMPLOYEES_ACTION,
     MANAGE_EMPLOYEES_CALLBACK_ID,
     NUDGE_ACTION,
@@ -52,6 +53,7 @@ from leave.handlers import (
     open_burnout,
     open_burnout_ack,
     open_burnout_apply,
+    refresh_burnout,
     open_cancel_modal,
     open_group_picker,
     open_holidays,
@@ -327,11 +329,12 @@ def build_app(calendar=None, faas=False):
 
         app.view(GROUP_CALLBACK_ID)(ack=_ack, lazy=[_group_break_lazy])
 
-        # /burnout: the manager gate acks within 3s, then the board (several record
-        # reads) is built + DMed post-ack as a lazy listener, like the /control report.
-        def _burnout_ack(ack, body):
+        # /burnout: the manager gate + loading-modal open ack within 3s, then the
+        # board (several record reads) is built + swapped in post-ack as a lazy
+        # listener (the trigger_id only lives 3s, so the modal opens empty first).
+        def _burnout_ack(ack, body, client):
             with db.connect() as d:
-                open_burnout_ack(ack, body, d)
+                open_burnout_ack(ack, body, client, d)
 
         def _burnout_lazy(body, client):
             with db.connect() as d:
@@ -339,8 +342,15 @@ def build_app(calendar=None, faas=False):
 
         app.command("/burnout")(ack=_burnout_ack, lazy=[_burnout_lazy])
 
-        # Nudge button: ack the click at once, then the bot DMs the report + confirms
-        # to the manager post-ack (no DB — it books nothing).
+        # Refresh button: ack at once, then rebuild the open board modal post-ack.
+        def _burnout_refresh_lazy(body, client):
+            with db.connect() as d:
+                refresh_burnout(_noop_ack, body, client, d)
+
+        app.action(BURNOUT_REFRESH_ACTION)(ack=_ack, lazy=[_burnout_refresh_lazy])
+
+        # Nudge button: ack the click at once, then the bot DMs the report + flips the
+        # row to "Nudged" in the modal post-ack (no DB — it books nothing).
         def _nudge_lazy(body, client):
             handle_nudge(_noop_ack, body, client)
 
@@ -396,6 +406,11 @@ def build_app(calendar=None, faas=False):
         def _burnout(ack, body, client):
             with db.connect() as d:
                 open_burnout(ack, body, d, client)
+
+        @app.action(BURNOUT_REFRESH_ACTION)
+        def _burnout_refresh(ack, body, client):
+            with db.connect() as d:
+                refresh_burnout(ack, body, client, d)
 
         @app.action(NUDGE_ACTION)
         def _nudge(ack, body, client):
