@@ -99,14 +99,16 @@ later enforced capacity cap.
 _Avoid_: conflict checker, blackout, capacity limit
 
 **No-break stretch**:
-How long a person has gone without time off — days since their last *taken*
-(past approved) leave, extended by whether and when they have anything booked
-ahead. The primary measure of **burnout risk**, ranked across the team
-(longest first) with supporting flags (low remaining allowance late in the year,
-a long consecutive working stretch). Surfaced as a **burnout report** the admin
-pulls from `/control`; a future proactive **burnout warning** DMs the at-risk
-person and/or their manager. Explainable by design — every flag says why, never
-an opaque score.
+How long a person has *actually* gone without time off — calendar days since their
+last *taken* (past approved) leave, up to today (backward-looking; the year start is
+the anchor when they have never taken leave). The primary measure of **burnout
+risk**, ranked across the team, most at risk first. A break **booked ahead** is
+relief, not time endured: it never inflates the stretch, and it *lowers* risk —
+among equal stretches, someone with nothing booked outranks someone with a break
+coming. Surfaced two ways: the manager **burnout board** (`/burnout`) shows each
+direct report's stretch + remaining vacation; the admin **burnout report** CSV
+(`/control`) keeps the fuller flags (days left in the year, a long consecutive
+working stretch). Explainable by design — every flag says why, never an opaque score.
 _Avoid_: burnout score, wellness index
 
 **Max carry over**:

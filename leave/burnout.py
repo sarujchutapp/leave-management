@@ -9,15 +9,14 @@ interrupts. Both are explainable by construction — plain day arithmetic, no sc
 from datetime import date, timedelta
 
 
-def no_break_stretch(today, last_taken_end, next_booked_start):
-    """Calendar days of the no-leave window the person sits in: from the end of
-    their last taken (past approved) leave to the start of their next booked
-    (future approved/pending) leave. With no past leave the window opens at the
-    start of the year (a defined anchor, never an error); with nothing booked
-    ahead it runs to today (the dry spell so far)."""
+def no_break_stretch(today, last_taken_end):
+    """Calendar days a person has actually gone without time off: from the end of
+    their last taken (past approved) leave up to today. With no past leave the
+    window opens at the start of the year (a defined anchor, never an error). Looks
+    *backward only* — a break booked ahead is relief, not time already endured, so
+    it never inflates this count (it lowers risk instead; see the board's ranking)."""
     anchor = last_taken_end or date(today.year, 1, 1)
-    end = next_booked_start or today
-    return max((end - anchor).days, 0)
+    return max((today - anchor).days, 0)
 
 
 def expiring_quota(remaining_vacation, max_carry_over):
