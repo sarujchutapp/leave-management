@@ -65,11 +65,12 @@ def _board_text(client):
 
 
 def _nudge_buttons(view):
-    """The Nudge button accessory on each report row of a board view."""
+    """The Nudge button on each report row of a board view (in its actions block)."""
     return [
-        b["accessory"]
+        e
         for b in view["blocks"]
-        if isinstance(b.get("accessory"), dict) and b["accessory"].get("action_id") == NUDGE_ACTION
+        for e in b.get("elements", [])
+        if isinstance(e, dict) and e.get("action_id") == NUDGE_ACTION
     ]
 
 
@@ -280,25 +281,30 @@ def test_refresh_rebuilds_the_open_board(db):
 # --- Nudge button: bot DM + in-place confirmation, exercised on a board view --------
 
 def _view_with_row(value):
-    """A board view shaped like a real row (name section + a fields section carrying
-    the Nudge button) — the surface a click arrives from."""
+    """A board view shaped like a real row (a name+fields card over an actions block
+    carrying the Nudge button) — the surface a click arrives from."""
     return {
         "id": "V1",
         "external_id": "burnout-T",
         "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": "🔴  *#1 · Alice*"}},
             {
                 "type": "section",
+                "text": {"type": "mrkdwn", "text": "🔴  *#1 · Alice*"},
                 "fields": [
                     {"type": "mrkdwn", "text": "*Days since last leave*\n140"},
                     {"type": "mrkdwn", "text": "*Vacation left*\n3 days"},
                 ],
-                "accessory": {
-                    "type": "button",
-                    "action_id": NUDGE_ACTION,
-                    "text": {"type": "plain_text", "text": "🌿 Nudge"},
-                    "value": value,
-                },
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": NUDGE_ACTION,
+                        "text": {"type": "plain_text", "text": "🌿 Nudge"},
+                        "value": value,
+                    }
+                ],
             },
         ],
     }
@@ -325,7 +331,7 @@ def test_clicking_nudge_dms_the_report_and_marks_the_row_in_place(db):
     assert "Manager" not in dm and "U_M" not in dm  # bot-voiced, not the manager
     # The manager's confirmation is that row flipping to "Nudged" in place.
     updated = client.views_update_calls[-1]["view"]
-    assert "✓ _Nudged_" in _view_text(updated)
+    assert "✓ Nudged" in _view_text(updated)
     assert _nudge_buttons(updated) == []  # the button is gone, can't re-fire
 
 

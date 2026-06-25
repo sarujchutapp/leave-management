@@ -265,32 +265,34 @@ def build_burnout_loading_modal(external_id):
 
 
 def _burnout_row_blocks(rank, s, avatar_url=None):
-    """One ranked report: a name row (rank, risk dot, profile picture when known)
-    over the two flags that matter at a glance — days since last leave and vacation
-    left — with the Nudge button alongside. The dot only bands the visible no-break
-    stretch, never an opaque score."""
-    name = {
+    """One ranked report as a single card: the name (rank, risk dot) over the two
+    flags that matter at a glance — days since last leave and vacation left — with
+    the profile picture filling the right (when known), then a Nudge button beneath.
+    The dot only bands the visible no-break stretch, never an opaque score."""
+    card = {
         "type": "section",
         "text": {"type": "mrkdwn", "text": f"{_risk_dot(s.stretch)}  *#{rank} · {s.name}*"},
+        "fields": [
+            {"type": "mrkdwn", "text": f"*Days since last leave*\n{s.stretch}"},
+            {"type": "mrkdwn", "text": f"*Vacation left*\n{s.remaining} days"},
+        ],
     }
     if avatar_url:
-        name["accessory"] = {"type": "image", "image_url": avatar_url, "alt_text": s.name}
+        card["accessory"] = {"type": "image", "image_url": avatar_url, "alt_text": s.name}
     return [
-        name,
+        card,
         {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Days since last leave*\n{s.stretch}"},
-                {"type": "mrkdwn", "text": f"*Vacation left*\n{s.remaining} days"},
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": NUDGE_ACTION,
+                    "text": {"type": "plain_text", "text": "🌿 Nudge"},
+                    "value": json.dumps(
+                        {"user_id": s.user_id, "name": s.name, "stretch": s.stretch, "expiring": s.expiring}
+                    ),
+                }
             ],
-            "accessory": {
-                "type": "button",
-                "action_id": NUDGE_ACTION,
-                "text": {"type": "plain_text", "text": "🌿 Nudge"},
-                "value": json.dumps(
-                    {"user_id": s.user_id, "name": s.name, "stretch": s.stretch, "expiring": s.expiring}
-                ),
-            },
         },
     ]
 
@@ -353,20 +355,16 @@ def build_burnout_board_modal(signals, external_id=None, avatars=None):
 
 
 def mark_row_nudged(view, value):
-    """The manager's in-place confirmation: on the row whose Nudge button matches
-    `value`, drop the button and show a '✓ Nudged' marker, returning the updated
-    modal view for views_update. (A nudge persists nothing, so this lives only in
-    the view.) Handles either a fields row or a text row carrying the button."""
-    nudged = {"type": "mrkdwn", "text": "✓ _Nudged_"}
+    """The manager's in-place confirmation: replace the Nudge button matching `value`
+    with a '✓ Nudged' marker, returning the updated modal view for views_update. (A
+    nudge persists nothing, so this lives only in the view.)"""
     blocks = []
     for b in view["blocks"]:
-        acc = b.get("accessory")
-        if acc and acc.get("action_id") == NUDGE_ACTION and acc.get("value") == value:
-            b = {k: v for k, v in b.items() if k != "accessory"}
-            if "fields" in b:
-                b["fields"] = b["fields"] + [nudged]
-            else:
-                b["text"] = {"type": "mrkdwn", "text": b["text"]["text"] + "   ·   ✓ _Nudged_"}
+        if b.get("type") == "actions" and any(
+            e.get("action_id") == NUDGE_ACTION and e.get("value") == value
+            for e in b.get("elements", [])
+        ):
+            b = {"type": "context", "elements": [{"type": "mrkdwn", "text": "✓ Nudged"}]}
         blocks.append(b)
     return _burnout_modal_view(blocks, view.get("external_id"))
 
