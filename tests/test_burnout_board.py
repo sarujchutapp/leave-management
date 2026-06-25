@@ -99,10 +99,13 @@ def test_manager_sees_direct_reports_ranked_with_explainable_flags(db):
     text = _board_text(client)
     assert text.index("Alice") < text.index("Bob")  # longest no-break stretch ranks first
     assert "#1 · Alice" in text and "#2 · Bob" in text  # ranked, most at risk first
-    # The supporting flags are spelled out — never an opaque score.
+    # The board is trimmed to the two flags that matter at a glance — and the dot
+    # only bands the visible stretch, never an opaque score.
     assert "Days since last leave" in text
-    assert "Days left in year" in text
-    assert "Longest working stretch" in text
+    assert "Vacation left" in text
+    assert "Longest working stretch" not in text  # moved off the board (kept in the CSV)
+    assert "Days left in year" not in text
+    assert "expiring" not in text.lower()  # forward-looking; /advance owns that
 
 
 def test_board_opens_a_loading_modal_then_fills_it(db):
@@ -191,41 +194,38 @@ def test_report_who_never_took_leave_is_handled(db):
     assert "Alice" in _board_text(client)
 
 
-def test_board_shows_expiring_quota_flag_when_days_will_be_forfeited(db):
-    set_policy(db)  # default cap: 5 vacation days may carry over
+def test_nothing_booked_outranks_a_break_already_booked_ahead(db):
+    # Two reports who've both gone the same time without leave — but one has a break
+    # booked in August (relief coming). The one with nothing booked is the concern,
+    # so they rank first; a booked break must not push someone up the risk list.
+    set_policy(db)
     upsert_employee(db, "U_M", "Manager", None)
-    upsert_employee(db, "U_A", "Alice", "U_M")  # fresh: 10 vacation, 5 over the cap
-    client = FakeSlackClient()
+    upsert_employee(db, "U_NONE", "Nora", "U_M")  # nothing booked
+    upsert_employee(db, "U_BOOKED", "Ben", "U_M")  # a break booked ahead
+    create_request(db, "U_BOOKED", "vacation", date(2026, 8, 10), date(2026, 8, 12), None)
 
-    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
-
-    assert "5 days expiring Dec 31" in _board_text(client)
-
-
-def test_board_indicates_none_when_nothing_will_expire(db):
-    # A generous carry-over cap means the whole balance carries — nothing forfeited.
-    set_policy(db, max_carry_over={"vacation": 20})
-    upsert_employee(db, "U_M", "Manager", None)
-    upsert_employee(db, "U_A", "Alice", "U_M")
-    client = FakeSlackClient()
-
-    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
-
-    text = _board_text(client)
-    assert "Nothing this year" in text
-    assert "expiring Dec 31" not in text
+    signals = ranked_burnout_signals(
+        db, [get_employee(db, "U_BOOKED"), get_employee(db, "U_NONE")], TODAY
+    )
+    assert signals[0].stretch == signals[1].stretch  # same days since last leave
+    assert [s.name for s in signals] == ["Nora", "Ben"]  # nothing booked ranks first
 
 
-def test_expiring_flag_is_computed_at_the_year_boundary(db):
-    # On Dec 31 (no days left) the flag is still computed from the balance vs cap.
+def test_board_shows_profile_pictures_when_available(db):
     set_policy(db)
     upsert_employee(db, "U_M", "Manager", None)
     upsert_employee(db, "U_A", "Alice", "U_M")
     client = FakeSlackClient()
+    client.avatars["U_A"] = "https://example.com/alice.png"  # Slack profile image
 
-    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=date(2026, 12, 31))
+    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
 
-    assert "5 days expiring Dec 31" in _board_text(client)
+    images = [
+        b["accessory"]
+        for b in _board_view(client)["blocks"]
+        if isinstance(b.get("accessory"), dict) and b["accessory"].get("type") == "image"
+    ]
+    assert any(img["image_url"] == "https://example.com/alice.png" for img in images)
 
 
 def test_board_and_csv_compute_the_same_signals(db):
@@ -280,22 +280,26 @@ def test_refresh_rebuilds_the_open_board(db):
 # --- Nudge button: bot DM + in-place confirmation, exercised on a board view --------
 
 def _view_with_row(value):
-    """A board view containing one Nudge button carrying `value` — the surface a
-    click arrives from."""
+    """A board view shaped like a real row (name section + a fields section carrying
+    the Nudge button) — the surface a click arrives from."""
     return {
         "id": "V1",
         "external_id": "burnout-T",
         "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "🔴  *#1 · Alice*"}},
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": "🔴  *#1 · Alice*"},
+                "fields": [
+                    {"type": "mrkdwn", "text": "*Days since last leave*\n140"},
+                    {"type": "mrkdwn", "text": "*Vacation left*\n3 days"},
+                ],
                 "accessory": {
                     "type": "button",
                     "action_id": NUDGE_ACTION,
                     "text": {"type": "plain_text", "text": "🌿 Nudge"},
                     "value": value,
                 },
-            }
+            },
         ],
     }
 

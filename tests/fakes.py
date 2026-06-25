@@ -93,6 +93,7 @@ class FakeSlackClient:
         self.chat_update_calls = []
         self.files_upload_v2_calls = []
         self.bot_users = set()  # user ids that users_info should report as bots
+        self.avatars = {}  # user id -> profile image URL users_info should report
 
     def views_open(self, **kwargs):
         self.views_open_calls.append(kwargs)
@@ -120,4 +121,11 @@ class FakeSlackClient:
 
     def users_info(self, **kwargs):
         uid = kwargs.get("user")
-        return {"ok": True, "user": {"id": uid, "is_bot": uid in self.bot_users}}
+        return {
+            "ok": True,
+            "user": {
+                "id": uid,
+                "is_bot": uid in self.bot_users,
+                "profile": {"image_72": self.avatars.get(uid)},
+            },
+        }

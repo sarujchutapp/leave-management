@@ -8,22 +8,21 @@ from leave.burnout import expiring_quota, longest_working_stretch, no_break_stre
 TODAY = date(2026, 6, 24)  # a Wednesday
 
 
-def test_stretch_spans_last_taken_to_next_booked():
-    # A break taken in the past and one booked ahead: the stretch is the whole
-    # gap the person endures between the two, in calendar days.
-    stretch = no_break_stretch(TODAY, date(2026, 3, 1), date(2026, 9, 1))
-    assert stretch == (date(2026, 9, 1) - date(2026, 3, 1)).days
-
-
-def test_stretch_runs_to_today_when_nothing_booked_ahead():
-    # No relief in sight: the dry spell is measured from the last break to today.
-    stretch = no_break_stretch(TODAY, date(2026, 3, 1), None)
+def test_stretch_is_days_since_last_taken_leave():
+    # Backward-looking: days actually gone without time off, last break to today.
+    stretch = no_break_stretch(TODAY, date(2026, 3, 1))
     assert stretch == (TODAY - date(2026, 3, 1)).days
+
+
+def test_stretch_ignores_breaks_booked_ahead():
+    # A break booked for the future is relief, not time endured — the same as
+    # having nothing booked, the count still runs only up to today.
+    assert no_break_stretch(TODAY, date(2026, 3, 1)) == (TODAY - date(2026, 3, 1)).days
 
 
 def test_never_taken_leave_anchors_at_year_start():
     # Handled sensibly: the stretch opens at the start of the year, not an error.
-    stretch = no_break_stretch(TODAY, None, None)
+    stretch = no_break_stretch(TODAY, None)
     assert stretch == (TODAY - date(2026, 1, 1)).days
 
 

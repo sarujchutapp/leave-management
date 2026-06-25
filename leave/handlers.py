@@ -755,8 +755,20 @@ def open_burnout_apply(body, db, client, today=None):
     external_id = _board_external_id(body)
     client.views_update(
         external_id=external_id,
-        view=build_burnout_board_modal(signals, external_id),
+        view=build_burnout_board_modal(signals, external_id, _avatar_urls(client, signals)),
     )
+
+
+def _avatar_urls(client, signals):
+    """Each person's Slack profile thumbnail, fetched live via users.info (needs
+    only users:read — nothing is stored). A missing/unavailable picture is simply
+    omitted, so the row just shows no avatar."""
+    urls = {}
+    for s in signals:
+        profile = client.users_info(user=s.user_id).get("user", {}).get("profile", {})
+        if profile.get("image_72"):
+            urls[s.user_id] = profile["image_72"]
+    return urls
 
 
 def open_burnout(ack, body, db, client, today=None):
@@ -774,7 +786,10 @@ def refresh_burnout(ack, body, client, db, today=None):
     today = today or date.today()
     reports = _direct_reports(db, body["user"]["id"])
     signals = ranked_burnout_signals(db, reports, today) if reports else []
-    client.views_update(view_id=body["view"]["id"], view=build_burnout_board_modal(signals))
+    client.views_update(
+        view_id=body["view"]["id"],
+        view=build_burnout_board_modal(signals, avatars=_avatar_urls(client, signals)),
+    )
 
 
 def _nudge_message(stretch, expiring):
