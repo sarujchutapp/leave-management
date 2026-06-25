@@ -88,8 +88,10 @@ def build_report_csv(db, today):
 # One employee's burnout signals. Shared by the burnout CSV report and the
 # /burnout board so the two can't drift. `expiring` is the year-end vacation
 # forfeit (board-only flag); the CSV keeps its original columns (BURNOUT_HEADER).
+# `user_id` carries the person so the board's Nudge button can target them.
 BurnoutSignals = namedtuple(
-    "BurnoutSignals", ["name", "stretch", "remaining", "days_left", "working", "expiring"]
+    "BurnoutSignals",
+    ["user_id", "name", "stretch", "remaining", "days_left", "working", "expiring"],
 )
 
 
@@ -119,7 +121,9 @@ def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, day
     working = longest_working_stretch(year_start, year_end, leave_ranges, holidays)
     remaining = remaining_balance(db, emp, "vacation", today)
     expiring = expiring_quota(remaining, max_carry_over)
-    return BurnoutSignals(emp.get("real_name", ""), stretch, remaining, days_left, working, expiring)
+    return BurnoutSignals(
+        emp["slack_user_id"], emp.get("real_name", ""), stretch, remaining, days_left, working, expiring
+    )
 
 
 def ranked_burnout_signals(db, employees, today):

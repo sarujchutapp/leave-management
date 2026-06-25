@@ -36,6 +36,7 @@ from leave.blocks import (
     MANAGE_ACTION_SELECT,
     MANAGE_EMPLOYEES_ACTION,
     MANAGE_EMPLOYEES_CALLBACK_ID,
+    NUDGE_ACTION,
     REPORT_ACTION,
     REPORT_CALLBACK_ID,
     REPORT_TYPE_ACTION,
@@ -45,6 +46,7 @@ from leave.handlers import (
     handle_approve,
     handle_decline_click,
     handle_decline_submit,
+    handle_nudge,
     open_advance,
     open_book_modal,
     open_burnout,
@@ -336,6 +338,13 @@ def build_app(calendar=None, faas=False):
                 open_burnout_apply(body, d, client)
 
         app.command("/burnout")(ack=_burnout_ack, lazy=[_burnout_lazy])
+
+        # Nudge button: ack the click at once, then the bot DMs the report + confirms
+        # to the manager post-ack (no DB — it books nothing).
+        def _nudge_lazy(body, client):
+            handle_nudge(_noop_ack, body, client)
+
+        app.action(NUDGE_ACTION)(ack=_ack, lazy=[_nudge_lazy])
     else:
 
         @app.view(LEAVE_CALLBACK_ID)
@@ -387,6 +396,10 @@ def build_app(calendar=None, faas=False):
         def _burnout(ack, body, client):
             with db.connect() as d:
                 open_burnout(ack, body, d, client)
+
+        @app.action(NUDGE_ACTION)
+        def _nudge(ack, body, client):
+            handle_nudge(ack, body, client)
 
     return app
 

@@ -1,5 +1,7 @@
 """Block Kit view builders."""
 
+import json
+
 LEAVE_TYPES = ["sick", "vacation", "personal"]
 
 LEAVE_CALLBACK_ID = "leave_submit"
@@ -9,6 +11,10 @@ ADVANCE_BOOK_ACTION = "advance_book"
 # /advance "Plan a group break" button -> the people-picker modal (group-break finder).
 GROUP_PICK_ACTION = "advance_group_pick"
 GROUP_CALLBACK_ID = "advance_group_submit"
+# /burnout "Nudge" button: the bot DMs the at-risk report a supportive wellbeing
+# message. The button value is a JSON blob of the row the manager saw (target,
+# name, stretch, expiring) so the DM cites that reason without a re-read.
+NUDGE_ACTION = "burnout_nudge"
 APPROVE_ACTION = "approve_request"
 DECLINE_ACTION = "decline_request"
 DECLINE_CALLBACK_ID = "decline_submit"
@@ -238,7 +244,25 @@ def build_burnout_board_blocks(signals):
             f"• longest working stretch: {s.working} days\n"
             f"• {expiring}"
         )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line}})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": line},
+                "accessory": {
+                    "type": "button",
+                    "action_id": NUDGE_ACTION,
+                    "text": {"type": "plain_text", "text": "Nudge"},
+                    "value": json.dumps(
+                        {
+                            "user_id": s.user_id,
+                            "name": s.name,
+                            "stretch": s.stretch,
+                            "expiring": s.expiring,
+                        }
+                    ),
+                },
+            }
+        )
     return blocks
 
 
