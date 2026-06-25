@@ -754,6 +754,36 @@ def open_burnout(ack, body, db, client, today=None):
     open_burnout_apply(body, db, client, today)
 
 
+def _nudge_message(stretch, expiring):
+    """The supportive, bot-voiced wellbeing DM: names the reason (the no-break
+    stretch, plus expiring vacation when relevant) and points to /advance to plan a
+    break. Reads as care, not surveillance — never punitive, and it books nothing."""
+    msg = (
+        f"Hi! 🌿 Just a friendly wellbeing check-in — it's been *{stretch} days* since "
+        "your last time off."
+    )
+    if expiring:
+        msg += f" You also have *{expiring}* vacation day(s) set to expire on Dec 31."
+    msg += (
+        " Taking a break is good for you. No pressure — but if you'd like to plan one, "
+        "`/advance` can suggest the best windows. 🌴"
+    )
+    return msg
+
+
+def handle_nudge(ack, body, client):
+    """`/burnout` Nudge button: the bot DMs the at-risk report a supportive,
+    wellbeing-framed message citing the reason the manager saw (carried in the
+    button value), then confirms to the manager. Bot-voiced — it never impersonates
+    the manager — and it books or modifies nothing. The DM is sent post-ack like
+    other slow handler work, so the click acks at once."""
+    ack()
+    payload = json.loads(body["actions"][0]["value"])
+    target = payload["user_id"]
+    _notify(client, target, _nudge_message(payload["stretch"], payload.get("expiring", 0)))
+    _notify(client, body["user"]["id"], f"✅ Sent a wellbeing nudge to <@{target}>.")
+
+
 def _to_gregorian(d):
     """Slack's date picker sends Buddhist-era years (CE + 543) in Thai locale.
     Convert those back to the Gregorian calendar."""
