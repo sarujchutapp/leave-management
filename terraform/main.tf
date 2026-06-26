@@ -248,25 +248,31 @@ resource "aws_lambda_permission" "function_invoke" {
 # ADR-0002's "don't pay for idle" rationale holds without literal scale-to-zero.
 # 4 min (not 5) for margin against Lambda's fuzzy lower-bound idle reclaim. See
 # ADR-0007 + research/coldstart-mitigation.md. (rate, not cron — no daily window.)
-resource "aws_cloudwatch_event_rule" "keep_warm" {
-  name                = "${var.function_name}-keep-warm"
-  description         = "Prime the leave bot every 4 min so /dayoff acks before Slack's 3s timeout"
-  schedule_expression = "rate(4 minutes)"
-}
-
-resource "aws_cloudwatch_event_target" "keep_warm" {
-  rule  = aws_cloudwatch_event_rule.keep_warm.name
-  arn   = aws_lambda_function.leave_bot.arn
-  input = jsonencode({ warmup = true })
-}
-
-resource "aws_lambda_permission" "keep_warm" {
-  statement_id  = "AllowEventBridgeKeepWarm"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.leave_bot.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.keep_warm.arn
-}
+#
+# PARKED (2026-06): commented out so `terraform apply` doesn't require events:PutRule,
+# which the deploy role doesn't have. Re-enable by uncommenting once an admin grants
+# the deploy role EventBridge perms on this rule's ARN (see ADR-0007 / the parked note).
+# The warmup short-circuit in lambda_handler.py stays — it's harmless without the rule.
+#
+# resource "aws_cloudwatch_event_rule" "keep_warm" {
+#   name                = "${var.function_name}-keep-warm"
+#   description         = "Prime the leave bot every 4 min so /dayoff acks before Slack's 3s timeout"
+#   schedule_expression = "rate(4 minutes)"
+# }
+#
+# resource "aws_cloudwatch_event_target" "keep_warm" {
+#   rule  = aws_cloudwatch_event_rule.keep_warm.name
+#   arn   = aws_lambda_function.leave_bot.arn
+#   input = jsonencode({ warmup = true })
+# }
+#
+# resource "aws_lambda_permission" "keep_warm" {
+#   statement_id  = "AllowEventBridgeKeepWarm"
+#   action        = "lambda:InvokeFunction"
+#   function_name = aws_lambda_function.leave_bot.function_name
+#   principal     = "events.amazonaws.com"
+#   source_arn    = aws_cloudwatch_event_rule.keep_warm.arn
+# }
 
 # --- Secrets (declared as code; real values set out-of-band in #17) ------------
 resource "aws_ssm_parameter" "slack_bot_token" {
