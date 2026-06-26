@@ -1,10 +1,11 @@
 # Keep the Lambda warm with a scheduled ping
 
-A scheduled EventBridge rule pings the Lambda every 5 minutes (`rate(5 minutes)`,
+A scheduled EventBridge rule pings the Lambda every 4 minutes (`rate(4 minutes)`,
 around the clock) with a `{"warmup": true}` event. The handler treats that event as a
 prime-and-return: it loads the SSM secrets and builds the Bolt app (the cold-start
 work), then returns *before* the Slack request path. We do **not** move to an always-on
-host or provisioned concurrency.
+host or provisioned concurrency. (4 min rather than 5 buys margin against Lambda's
+fuzzy lower-bound idle reclaim — see `research/coldstart-mitigation.md`.)
 
 This **refines** ADR-0002 (Lambda + HTTP mode); it does not reverse it.
 
@@ -28,7 +29,7 @@ before any handler runs, so it issues no reads/writes. The pay-per-query layer i
 untouched — it still charges exactly per real query.
 
 ADR-0002 extended the idea to compute, but its actual concern was *paying ~$3–9/month for
-idle compute* — not idleness as a virtue. A keep-warm ping's idle cost is **$0**: ~8,600
+idle compute* — not idleness as a virtue. A keep-warm ping's idle cost is **$0**: ~10,800
 tiny invocations/month sit far inside Lambda's perpetual free tier (1M requests +
 400k GB-s), and the ping does no DB I/O. So ADR-0002's "don't pay for idle" rationale is
 satisfied by a different route than literal scale-to-zero, at any hour. Pinging only
@@ -41,7 +42,7 @@ the message at every hour instead.
 - `lambda_handler.handler`: after priming secrets + app (the existing first-invocation
   bootstrap), `if event.get("warmup"): return {"ok": True}` — short-circuits before the
   Slack request path, which expects a signed HTTP event. No DynamoDB access on this path.
-- Terraform: an `aws_cloudwatch_event_rule` (`rate(5 minutes)`), an
+- Terraform: an `aws_cloudwatch_event_rule` (`rate(4 minutes)`), an
   `aws_cloudwatch_event_target` whose `input` is `{"warmup": true}`, and an
   `aws_lambda_permission` letting EventBridge invoke the function.
 
@@ -69,7 +70,7 @@ the message at every hour instead.
 
 ## Consequences
 
-- The Lambda no longer *literally* scales to zero (it is invoked every 5 min), but that
+- The Lambda no longer *literally* scales to zero (it is invoked every 4 min), but that
   was only ever a means to "no idle cost," which still holds ($0), and the cost-bearing
   layer (DynamoDB) stays pay-per-query and untouched.
 - A *simultaneous* second `/dayoff` in the same cold instant can still hit a cold
