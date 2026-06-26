@@ -100,10 +100,11 @@ def test_manager_sees_direct_reports_ranked_with_explainable_flags(db):
     text = _board_text(client)
     assert text.index("Alice") < text.index("Bob")  # longest no-break stretch ranks first
     assert "#1 · Alice" in text and "#2 · Bob" in text  # ranked, most at risk first
-    # The board is trimmed to the two flags that matter at a glance — and the dot
-    # only bands the visible stretch, never an opaque score.
+    # The board is trimmed to the flags that matter at a glance — and the dot only
+    # bands the visible stretch, never an opaque score.
     assert "Days since last leave" in text
     assert "Vacation left" in text
+    assert "Next break" in text
     assert "Longest working stretch" not in text  # moved off the board (kept in the CSV)
     assert "Days left in year" not in text
     assert "expiring" not in text.lower()  # forward-looking; /advance owns that
@@ -210,6 +211,34 @@ def test_nothing_booked_outranks_a_break_already_booked_ahead(db):
     )
     assert signals[0].stretch == signals[1].stretch  # same days since last leave
     assert [s.name for s in signals] == ["Nora", "Ben"]  # nothing booked ranks first
+
+
+def test_board_shows_next_booked_break_or_nothing(db):
+    set_policy(db)
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_BOOKED", "Ben", "U_M")
+    upsert_employee(db, "U_NONE", "Nora", "U_M")
+    create_request(db, "U_BOOKED", "vacation", date(2026, 8, 12), date(2026, 8, 14), None)
+    client = FakeSlackClient()
+
+    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
+
+    text = _board_text(client)
+    assert "Aug 12" in text  # Ben's next booked break, shown as the date
+    assert "Nothing booked" in text  # Nora has none ahead
+
+
+def test_cards_are_separated_by_dividers(db):
+    set_policy(db)
+    upsert_employee(db, "U_M", "Manager", None)
+    upsert_employee(db, "U_A", "Alice", "U_M")
+    upsert_employee(db, "U_B", "Bob", "U_M")
+    client = FakeSlackClient()
+
+    open_burnout(ack=FakeAck(), body=_command("U_M"), db=db, client=client, today=TODAY)
+
+    dividers = [b for b in _board_view(client)["blocks"] if b.get("type") == "divider"]
+    assert len(dividers) >= 2  # a separator line per person
 
 
 def test_board_shows_profile_pictures_when_available(db):

@@ -86,33 +86,35 @@ def build_report_csv(db, today):
 
 
 # One employee's burnout signals. Shared by the burnout CSV report and the
-# /burnout board so the two can't drift. The board shows `stretch` + `remaining`;
-# `days_left`/`working` are CSV-only columns; `expiring` rides the Nudge DM; and
-# `booked_ahead` (relief is coming) breaks ranking ties. `user_id` lets the board's
-# Nudge button + avatar target the person.
+# /burnout board so the two can't drift. The board shows `stretch` + `remaining` +
+# `next_break`; `days_left`/`working` are CSV-only columns; `expiring` rides the
+# Nudge DM. `next_break` (the date of their next booked break, or None) both shows
+# on the board and breaks ranking ties — relief lowers risk. `user_id` lets the
+# board's Nudge button + avatar target the person.
 BurnoutSignals = namedtuple(
     "BurnoutSignals",
-    ["user_id", "name", "stretch", "remaining", "days_left", "working", "expiring", "booked_ahead"],
+    ["user_id", "name", "stretch", "remaining", "days_left", "working", "expiring", "next_break"],
 )
 
 
 def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left, max_carry_over):
     """One employee's burnout signals: the no-break stretch (rank key) plus the
     supporting flags. The stretch is days since their last *taken* leave up to today
-    (backward only). `booked_ahead` records whether they have a future approved/
-    pending break — relief that lowers their risk on the board. Approved/pending
-    leave are the breaks that reset the longest working stretch. `expiring` is the
-    vacation that won't carry past year-end under the live policy cap."""
+    (backward only). `next_break` is the start of their earliest future approved/
+    pending break (or None) — relief that lowers their risk on the board. Approved/
+    pending leave are the breaks that reset the longest working stretch. `expiring`
+    is the vacation that won't carry past year-end under the live policy cap."""
     requests = _employee_requests(db, emp["slack_user_id"])
     taken_ends = [
         date.fromisoformat(r["end_date"])
         for r in requests
         if r["status"] == "approved" and date.fromisoformat(r["end_date"]) < today
     ]
-    booked_ahead = any(
-        r["status"] in ("approved", "pending") and date.fromisoformat(r["start_date"]) > today
+    booked_starts = [
+        date.fromisoformat(r["start_date"])
         for r in requests
-    )
+        if r["status"] in ("approved", "pending") and date.fromisoformat(r["start_date"]) > today
+    ]
     leave_ranges = [
         (date.fromisoformat(r["start_date"]), date.fromisoformat(r["end_date"]))
         for r in requests
@@ -122,8 +124,9 @@ def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, day
     working = longest_working_stretch(year_start, year_end, leave_ranges, holidays)
     remaining = remaining_balance(db, emp, "vacation", today)
     expiring = expiring_quota(remaining, max_carry_over)
+    next_break = min(booked_starts, default=None)
     return BurnoutSignals(
-        emp["slack_user_id"], emp.get("real_name", ""), stretch, remaining, days_left, working, expiring, booked_ahead
+        emp["slack_user_id"], emp.get("real_name", ""), stretch, remaining, days_left, working, expiring, next_break
     )
 
 
@@ -142,7 +145,7 @@ def ranked_burnout_signals(db, employees, today):
         employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left, max_carry_over)
         for emp in employees
     ]
-    signals.sort(key=lambda s: (-s.stretch, s.booked_ahead, s.name))
+    signals.sort(key=lambda s: (-s.stretch, s.next_break is not None, s.name))
     return signals
 
 

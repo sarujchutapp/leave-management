@@ -235,9 +235,10 @@ def _risk_dot(stretch):
     return "🟢"
 
 
-# Cap rows so the view stays under Slack's 100-block ceiling (2 blocks/row + a
-# handful of fixed blocks). Far above any real manager's direct-report count.
-_BURNOUT_MAX_ROWS = 45
+# Cap rows so the view stays under Slack's 100-block ceiling. Each row is 3 blocks
+# (a separator divider + the card + the Nudge actions row) plus a few fixed blocks,
+# so 30 rows ≈ 94 blocks. Far above any real manager's direct-report count.
+_BURNOUT_MAX_ROWS = 30
 
 
 def _burnout_modal_view(blocks, external_id=None):
@@ -265,17 +266,23 @@ def build_burnout_loading_modal(external_id):
 
 
 def _burnout_row_blocks(rank, s, avatar_url=None):
-    """One ranked report as a single card: the name (rank, risk dot) over the two
-    flags that matter at a glance — days since last leave and vacation left — with
-    the profile picture filling the right (when known), then a Nudge button beneath.
-    The dot only bands the visible no-break stretch, never an opaque score."""
+    """One ranked report as a single card: the name (rank, risk dot) over a tidy
+    vertical list of the flags that matter — days since last leave, vacation left,
+    and the next booked break (relief) — with the profile picture filling the right
+    (when known), then a Nudge button beneath. The dot only bands the visible
+    no-break stretch, never an opaque score."""
+    next_break = f"{s.next_break:%b} {s.next_break.day}" if s.next_break else "Nothing booked"
     card = {
         "type": "section",
-        "text": {"type": "mrkdwn", "text": f"{_risk_dot(s.stretch)}  *#{rank} · {s.name}*"},
-        "fields": [
-            {"type": "mrkdwn", "text": f"*Days since last leave*\n{s.stretch}"},
-            {"type": "mrkdwn", "text": f"*Vacation left*\n{s.remaining} days"},
-        ],
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                f"{_risk_dot(s.stretch)}  *#{rank} · {s.name}*\n"
+                f"*Days since last leave:*  {s.stretch}\n"
+                f"*Vacation left:*  {s.remaining} days\n"
+                f"*Next break:*  {next_break}"
+            ),
+        },
     }
     if avatar_url:
         card["accessory"] = {"type": "image", "image_url": avatar_url, "alt_text": s.name}
@@ -315,9 +322,11 @@ def build_burnout_board_modal(signals, external_id=None, avatars=None):
                 {"type": "mrkdwn", "text": "Your direct reports, ranked by burnout risk — most at risk first."}
             ],
         },
-        {"type": "divider"},
     ]
+    # A divider before each card separates one person from the next (Block Kit modals
+    # have no per-card colour, so a line is the separator).
     for rank, s in enumerate(signals[:_BURNOUT_MAX_ROWS], 1):
+        blocks.append({"type": "divider"})
         blocks += _burnout_row_blocks(rank, s, avatars.get(s.user_id))
     if len(signals) > _BURNOUT_MAX_ROWS:
         blocks.append(
