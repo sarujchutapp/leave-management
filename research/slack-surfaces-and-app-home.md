@@ -17,7 +17,11 @@ and [ADR-0007](../docs/adr/0007-keep-warm-ping.md).
   biggest gap is the **App Home tab** — a discoverable home base. Our slash commands are
   invisible: you must *know* `/dayoff` exists.
 - Adopting App Home needs **no new AWS permission** — it's Slack-side (Events API) + a
-  `views.publish` over the bot token we already have. Cost is **$0** at our scale.
+  `views.publish` over the bot token we already have.
+- **Cost:** Lambda is free-tier ($0). DynamoDB is the layer that actually bills (per read/write,
+  no on-demand free tier) — and *rendering live data on open is a read*. A **static command center
+  (buttons only)** reads nothing on open and bills only per-action; a **live dashboard** reads on
+  open (pennies). Both are pennies-to-$0 at our scale — the choice is UX/purity, not money.
 - It's the highest-leverage, IAM-free way to feel like the commercial tools. The lift is the
   Events API adoption (a one-line reversal of ADR-0002 → its own ADR) + a published view.
 
@@ -70,31 +74,50 @@ what buys us scale-to-zero / ~$0; they can't be serverless or Socket Mode as dis
   place to later host the burnout board + calendar. Costs: needs the **Events API**
   (`app_home_opened`) + `views.publish`, and a stateful view to (re)build.
 
-## Cost: what Events API / App Home actually costs us
+## Cost: what App Home actually costs us
 
-- **Slack charges nothing** — the Events API is a free core platform feature.
-- **Our cost is Lambda invocations.** Each event Slack sends is one HTTP POST → one invocation.
-  We'd subscribe to **`app_home_opened` only** (fires when a user opens the Home tab). For a
-  5–20-person team that's a few thousand invocations/month — far inside Lambda's perpetual free
-  tier (1M requests + 400k GB-s). **Effectively $0.**
-- **The only way it gets expensive** is subscribing to *chatty* events (e.g. `message.channels` =
-  every message). We don't — narrow subscription = bounded volume.
+Two layers, and they behave differently — don't conflate them.
 
-**Invocation pattern — the nuance:**
+**Lambda — free.** Slack's Events API is free; each event/interaction is one invocation, and at a
+5–20-person team's volume it's far inside the perpetual free tier (1M requests + 400k GB-s). **$0.**
+(Only chatty subscriptions like `message.channels` would change that — we subscribe to
+`app_home_opened` only, so volume is bounded.)
 
-- Slash commands bill per **action** (you typed a command / clicked a button — every invocation
-  maps to someone *doing* something).
-- App Home also bills per **view** (`app_home_opened` fires when someone *opens/looks at* the tab,
-  and can fire on re-opens).
+**DynamoDB — the layer that actually bills.** On-demand (`PAY_PER_REQUEST`) charges **per operation
+— every read *and* every write** (~$0.13 per *million* read units), and on-demand gets **no
+free-request tier** (the 25-RCU free tier is provisioned-mode only). So this is the layer to reason
+about for pay-per-usage purity.
 
-So App Home introduces *view-driven* invocations on top of action-driven ones — strictly *more*
-traffic than slash-commands-only. But "more" is trivial here: you'd need ~1M opens/month to leave
-the free tier. **In dollars the two are identical ($0); they differ only in pattern** (App Home
-dents the "pay only when someone *does* something" purity slightly — you now also "pay" (free) when
-someone looks).
+The trap: **viewing your own data is a database read.** A tab that shows your balance + leave isn't
+a no-op on open — the app must *read* that data to render it, and DynamoDB bills reads, not just
+writes/actions:
 
-**Bottom line: cost is not a differentiator** between slash-command-only and adding App Home. The
-real trade-offs are UX (discoverability, a dashboard home) and one-time setup (Events API + an ADR).
+- `/dayoff` opening a modal → reads your balances to show them → billed (we pay this today).
+- App Home open *that renders live data* → reads → billed.
+- Keep-warm ping → renders nothing, reads nothing → genuinely $0.
+
+So App Home, *if it renders a live dashboard*, shifts DB reads from **per-action** to **per-view**
+(people glance more than they act; `app_home_opened` can re-fire) — strictly more reads than
+slash-only.
+
+**The design lever — command center vs dashboard.** That per-*open* read cost exists ONLY if the
+home renders live data. Make the home a **static command center (labeled buttons, no personalized
+data)** and opening it reads nothing — you touch the DB only when a button is *clicked*
+(per-action, same as a slash command):
+
+| Home style | On open | On click | At-a-glance |
+|---|---|---|---|
+| **Static command center** (buttons only) | **$0** — no DB read | per-action (DB as needed) | low — click to see anything |
+| **Data dashboard** (balance/leave shown) | DB reads (pennies) | per-action | high — see everything at once |
+
+A static command center is *more* pay-per-usage-pure than even the slash-command setup (nothing
+happens until you press something) and still beats invisible commands on discoverability. The trade
+is **UX, not money**: it doesn't *show* your balance until you click "My balance".
+
+**Bottom line:** at our scale every option is pennies-to-$0, so cost isn't a real differentiator —
+the trade-offs are UX (glance vs click), purity (per-view vs per-action), and one-time setup (Events
+API + an ADR). But if pay-per-usage purity is the pitch, the **static command center keeps opens
+free and bills only on action** — the cleanest fit.
 
 ## Why we didn't use the Events API originally
 
@@ -145,16 +168,31 @@ only, Events off" line.
 **Deploy:** existing `./build.sh && terraform apply` (no terraform change, no new perms). Only manual
 step is the Slack config above.
 
-**Content design — v1 (tracer):**
+**Content design — two flavours (decide up front, it shapes the cost):**
+
+*Static command center* (recommended for pay-per-usage purity) — buttons only, **no DB read on
+open**:
+```
+🏖  Leave
+ [ Request leave ]   [ Cancel a request ]
+ [ Plan a break ]    [ My balance ]
+```
+Opening reads nothing; each button reads only what its action needs (per-action, like a slash
+command). Publish a static view on `app_home_opened` (or once) and no-op repeat opens.
+
+*Live dashboard* (the Flamingo/Vacation-Tracker feel) — renders personal data on open (reads DB,
+pennies):
 ```
 🏖  Your Leave
 Hi Alice! Here's where you stand.
  Vacation: 7 left   ·   Sick: 28   ·   Personal: 5
  [ Request leave ]   [ Plan a break ]
 ```
-**Expansion:** upcoming/recent leave list + [ Cancel a request ]; managers → [ Burnout board ];
-admins → [ Admin controls ]; not-registered user → a "contact your admin" card. The view is rebuilt
-on each open from live data (nothing new to persist).
+
+**Expansion (either flavour):** upcoming/recent leave + [ Cancel a request ]; managers →
+[ Burnout board ]; admins → [ Admin controls ]; not-registered user → a "contact your admin" card.
+A live dashboard is rebuilt from live data on each open (nothing new to persist); a command center
+publishes a static view and fetches only on click.
 
 **Slices (tracer-bullet, TDD):**
 1. `app_home_opened` → publish balances + a "Request leave" button that opens the existing modal
@@ -175,8 +213,13 @@ on each open from live data (nothing new to persist).
 App Home is the **highest-leverage, AWS-permission-free** way to close the biggest gap with
 Flamingo / Vacation Tracker — a discoverable home base instead of "a bot you must know the commands
 for." It's a bigger lift than a slash-command feature (Events API + a published view + an ADR), but
-cost is not a reason to hesitate ($0 either way). The decision is purely: is the discoverability
-worth the one-time Events-API setup?
+cost is not a reason to hesitate ($0–pennies either way). The decision is: is the discoverability
+worth the one-time Events-API setup — and if so, **static command center or live dashboard?**
+
+Recommended starting point: a **static command center** — it's the cheapest (free opens, per-action
+billing), the simplest to build (no per-user data assembly on open), and the most on-brand for the
+pay-per-usage pitch, while still giving the discoverable, labeled home that slash commands lack. A
+live dashboard can come later if the at-a-glance balance proves worth the per-open reads.
 
 ## Sources
 
