@@ -112,3 +112,19 @@ def test_handler_runs_bootstrap_lazily_once(ssm_env, monkeypatch):
     assert json.loads(first["body"])["challenge"] == "abc123"
     assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-real"
     assert calls == [1]  # fetched once, then reused warm
+
+
+def test_warmup_ping_primes_the_container_without_handling_a_request(ssm_env, monkeypatch):
+    # The EventBridge keep-warm ping primes the container (secrets + app) and returns
+    # early, so it never enters the Slack request path (no signature, no statusCode).
+    monkeypatch.setattr(lambda_handler, "_handler", None)
+    monkeypatch.setattr(lambda_handler, "_secrets_loaded", False)
+    monkeypatch.setattr(app.CalendarClient, "from_env", staticmethod(FakeCalendar))
+
+    with mock_aws():
+        _seed_params()
+        resp = lambda_handler.handler({"warmup": True}, _Ctx())
+
+    assert resp == {"ok": True}  # short-circuited, not a Slack HTTP response
+    assert os.environ["SLACK_BOT_TOKEN"] == "xoxb-real"  # primed: secrets fetched
+    assert lambda_handler._handler is not None  # primed: app built, ready for the next call

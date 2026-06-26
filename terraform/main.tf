@@ -238,6 +238,34 @@ resource "aws_lambda_permission" "function_invoke" {
   principal     = "*"
 }
 
+# --- Keep-warm ping (business hours) -------------------------------------------
+# A scheduled ping primes the container during working hours so the synchronous
+# /dayoff modal-open acks within Slack's 3s window. A cold start otherwise lands
+# the ack late and Slack shows "operation_timeout" (the modal still opens, but the
+# message alarms users). Business-hours-only preserves the pay-per-usage model:
+# nights and weekends it still scales fully to zero. Cost is $0 — the pings sit far
+# inside Lambda's perpetual free tier. The schedule is UTC; 01:00–12:55 UTC every
+# 5 min on weekdays ≈ 08:00–20:00 ICT (UTC+7). Edit the cron to change the window.
+resource "aws_cloudwatch_event_rule" "keep_warm" {
+  name                = "${var.function_name}-keep-warm"
+  description         = "Prime the leave bot during business hours so /dayoff acks before Slack's 3s timeout"
+  schedule_expression = "cron(0/5 1-12 ? * MON-FRI *)"
+}
+
+resource "aws_cloudwatch_event_target" "keep_warm" {
+  rule  = aws_cloudwatch_event_rule.keep_warm.name
+  arn   = aws_lambda_function.leave_bot.arn
+  input = jsonencode({ warmup = true })
+}
+
+resource "aws_lambda_permission" "keep_warm" {
+  statement_id  = "AllowEventBridgeKeepWarm"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.leave_bot.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.keep_warm.arn
+}
+
 # --- Secrets (declared as code; real values set out-of-band in #17) ------------
 resource "aws_ssm_parameter" "slack_bot_token" {
   name  = local.ssm_bot_token_param
