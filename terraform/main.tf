@@ -239,18 +239,19 @@ resource "aws_lambda_permission" "function_invoke" {
 }
 
 # --- Keep-warm ping ------------------------------------------------------------
-# A scheduled ping every 5 minutes primes the container so the synchronous /dayoff
+# A scheduled ping every 4 minutes primes the container so the synchronous /dayoff
 # modal-open acks within Slack's 3s window. A cold start otherwise lands the ack
 # late and Slack shows "operation_timeout" (the modal still opens, but the message
 # alarms users). The ping short-circuits before the Slack request path, so it never
 # queries DynamoDB — the pay-per-query layer (ADR-0001) is untouched. Cost is $0:
-# ~8.6k tiny invocations/month sit far inside Lambda's perpetual free tier, so
+# ~10.8k tiny invocations/month sit far inside Lambda's perpetual free tier, so
 # ADR-0002's "don't pay for idle" rationale holds without literal scale-to-zero.
-# See ADR-0007. (rate, not cron — there is no daily window to express.)
+# 4 min (not 5) for margin against Lambda's fuzzy lower-bound idle reclaim. See
+# ADR-0007 + research/coldstart-mitigation.md. (rate, not cron — no daily window.)
 resource "aws_cloudwatch_event_rule" "keep_warm" {
   name                = "${var.function_name}-keep-warm"
-  description         = "Prime the leave bot every 5 min so /dayoff acks before Slack's 3s timeout"
-  schedule_expression = "rate(5 minutes)"
+  description         = "Prime the leave bot every 4 min so /dayoff acks before Slack's 3s timeout"
+  schedule_expression = "rate(4 minutes)"
 }
 
 resource "aws_cloudwatch_event_target" "keep_warm" {
