@@ -106,7 +106,8 @@ risk**, ranked across the team, most at risk first. A break **booked ahead** is
 relief, not time endured: it never inflates the stretch, and it *lowers* risk —
 among equal stretches, someone with nothing booked outranks someone with a break
 coming. Surfaced two ways: the manager **burnout board** (`/burnout`) shows each
-direct report's stretch + remaining vacation; the admin **burnout report** CSV
+direct report's stretch, remaining vacation, and next booked break; the admin
+**burnout report** CSV
 (`/control`) keeps the fuller flags (days left in the year, a long consecutive
 working stretch). Explainable by design — every flag says why, never an opaque score.
 _Avoid_: burnout score, wellness index
