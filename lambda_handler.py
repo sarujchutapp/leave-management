@@ -62,4 +62,10 @@ def handler(event, context):
         _secrets_loaded = True
     if _handler is None:
         _handler = SlackRequestHandler(app=build_app(faas=True))
+    # Scheduled keep-warm ping (EventBridge, business hours): the lines above have
+    # primed the container — secrets fetched, app built — so the next real /dayoff
+    # acks within Slack's 3s window instead of paying cold-start cost. Nothing to
+    # hand to the Slack request path, so return before it.
+    if isinstance(event, dict) and event.get("warmup"):
+        return {"ok": True}
     return _handler.handle(event, context)
