@@ -238,18 +238,19 @@ resource "aws_lambda_permission" "function_invoke" {
   principal     = "*"
 }
 
-# --- Keep-warm ping (business hours) -------------------------------------------
-# A scheduled ping primes the container during working hours so the synchronous
-# /dayoff modal-open acks within Slack's 3s window. A cold start otherwise lands
-# the ack late and Slack shows "operation_timeout" (the modal still opens, but the
-# message alarms users). Business-hours-only preserves the pay-per-usage model:
-# nights and weekends it still scales fully to zero. Cost is $0 — the pings sit far
-# inside Lambda's perpetual free tier. The schedule is UTC; 01:00–12:55 UTC every
-# 5 min on weekdays ≈ 08:00–20:00 ICT (UTC+7). Edit the cron to change the window.
+# --- Keep-warm ping ------------------------------------------------------------
+# A scheduled ping every 5 minutes primes the container so the synchronous /dayoff
+# modal-open acks within Slack's 3s window. A cold start otherwise lands the ack
+# late and Slack shows "operation_timeout" (the modal still opens, but the message
+# alarms users). The ping short-circuits before the Slack request path, so it never
+# queries DynamoDB — the pay-per-query layer (ADR-0001) is untouched. Cost is $0:
+# ~8.6k tiny invocations/month sit far inside Lambda's perpetual free tier, so
+# ADR-0002's "don't pay for idle" rationale holds without literal scale-to-zero.
+# See ADR-0007. (rate, not cron — there is no daily window to express.)
 resource "aws_cloudwatch_event_rule" "keep_warm" {
   name                = "${var.function_name}-keep-warm"
-  description         = "Prime the leave bot during business hours so /dayoff acks before Slack's 3s timeout"
-  schedule_expression = "cron(0/5 1-12 ? * MON-FRI *)"
+  description         = "Prime the leave bot every 5 min so /dayoff acks before Slack's 3s timeout"
+  schedule_expression = "rate(5 minutes)"
 }
 
 resource "aws_cloudwatch_event_target" "keep_warm" {
