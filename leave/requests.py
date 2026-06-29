@@ -213,6 +213,42 @@ def active_full_leave_ranges(db, employee_id):
     ]
 
 
+def pending_vacation_days(db, employee_id, today):
+    """Days of the employee's PENDING vacation whose start_date falls in the current
+    year (half-days count 0.5). The optimizer subtracts these from remaining_balance
+    so it plans only against truly-free days — pending is treated as committed.
+    validate_request, the hard gate, stays approved-only (see ADR-0008)."""
+    year_start = date(today.year, 1, 1).isoformat()
+    year_end = date(today.year, 12, 31).isoformat()
+    resp = db.requests.query(
+        IndexName=db.by_employee_index,
+        KeyConditionExpression=Key("employee_id").eq(employee_id)
+        & Key("start_date").between(year_start, year_end),
+    )
+    holidays = holidays_for_year(db, today.year)
+    return sum(
+        request_days(
+            date.fromisoformat(r["start_date"]),
+            date.fromisoformat(r["end_date"]),
+            r.get("half"),
+            holidays,
+        )
+        for r in resp["Items"]
+        if r["status"] == "pending" and r["leave_type"] == "vacation"
+    )
+
+
+def half_day_dates(db, employee_id):
+    """The dates of the employee's pending/approved HALF-day leave. A half-day is a
+    single date (start == end) and a 'present' day, so it can't be re-booked but
+    still bounds a run — the optimizer treats these as blocked-but-present."""
+    return {
+        date.fromisoformat(r["start_date"])
+        for r in _by_employee(db, employee_id)
+        if r["status"] in ("pending", "approved") and r.get("half")
+    }
+
+
 def pending_approved_intervals(db, employee_id):
     """(start, end, status) for the employee's pending/approved leave, full or
     half day. Coverage Radar uses these to find peer overlaps (a half-day still

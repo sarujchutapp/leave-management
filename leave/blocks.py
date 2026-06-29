@@ -172,15 +172,25 @@ def build_leave_modal(balances=None, prefill=None):
     }
 
 
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _short_range(start, end):
+    """Compact booking range, e.g. "Jun 8", "Jun 8–12", or "Jun 29 – Jul 3"."""
+    if start == end:
+        return f"{_MONTHS[start.month - 1]} {start.day}"
+    if start.month == end.month:
+        return f"{_MONTHS[start.month - 1]} {start.day}–{end.day}"
+    return f"{_MONTHS[start.month - 1]} {start.day} – {_MONTHS[end.month - 1]} {end.day}"
+
+
 def _advance_option_line(index, brk):
-    book = brk.book_start.isoformat()
-    if brk.book_end != brk.book_start:
-        book += f" → {brk.book_end.isoformat()}"
-    unit = "day" if brk.cost == 1 else "days"
-    return (
-        f"*{index}.* Book vacation *{book}* ({brk.cost} {unit}) → "
-        f"*{brk.span_days} days off* ({brk.span_start.isoformat()} → {brk.span_end.isoformat()})"
-    )
+    # Compact for the small modal: days-off length, quota used, and the booking dates
+    # in short form (the same dates the Book button pre-fills in the apply modal).
+    off = "day" if brk.span_days == 1 else "days"
+    used = "day" if brk.cost == 1 else "days"
+    dates = _short_range(brk.book_start, brk.book_end)
+    return f"*{index}.* *{brk.span_days} {off} off* · {brk.cost} {used} used ({dates})"
 
 
 def build_advance_blocks(breaks):
@@ -221,6 +231,24 @@ def build_advance_blocks(breaks):
         }
     )
     return blocks
+
+
+def build_advance_modal(breaks, empty_text):
+    """The /advance modal: the same option content as `build_advance_blocks` (one
+    section + Book button per break, then the group-break button) when `breaks` is
+    non-empty, or a single note (`empty_text`) when there's nothing to suggest. A
+    display-only modal — Close, no submit."""
+    blocks = (
+        build_advance_blocks(breaks)
+        if breaks
+        else [{"type": "section", "text": {"type": "mrkdwn", "text": empty_text}}]
+    )
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Leave Optimizer"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
+    }
 
 
 def _risk_dot(stretch):
