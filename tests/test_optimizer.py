@@ -60,6 +60,17 @@ def test_group_break_builds_around_a_shared_existing_booking():
     )
 
 
+def test_group_break_excludes_a_members_blocked_date():
+    # One member holds a half-day on Wed 06-10 (blocked-but-present), so the shared
+    # all-off window may not cover that date even though everyone has balance.
+    blocked = frozenset({date(2026, 6, 10)})
+    members = [Member(5, 9, []), Member(5, 9, [], blocked)]
+    window = group_break(date(2026, 6, 1), YEAR_END, set(), members)
+    assert window is not None
+    start, end = window
+    assert not (start <= date(2026, 6, 10) <= end)
+
+
 def test_group_break_infeasible_returns_none():
     # A member with no vacation left can't be off on any working day, so no shared
     # window with a real break exists.
@@ -69,6 +80,17 @@ def test_group_break_infeasible_returns_none():
 
 def test_group_break_no_members_returns_none():
     assert group_break(date(2026, 6, 1), YEAR_END, set(), []) is None
+
+
+def test_blocked_date_never_inside_a_suggested_booking():
+    # A half-day already sits on Wed 06-03, so that date is blocked-but-present:
+    # no suggested booking may cover it (booking it would overlap the half-day at
+    # submit time), though it still bounds runs like any worked day.
+    blocked = {date(2026, 6, 3)}
+    breaks = top_breaks(date(2026, 6, 1), YEAR_END, 5, set(), [], 9, blocked_dates=blocked)
+    assert breaks
+    for brk in breaks:
+        assert not (brk.book_start <= date(2026, 6, 3) <= brk.book_end)
 
 
 def _overlap_days(a, b):

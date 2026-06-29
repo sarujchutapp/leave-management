@@ -11,7 +11,7 @@ from leave.blocks import (
     CLEAR_CONFIRM_WORD,
     MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
-    build_advance_blocks,
+    build_advance_modal,
     build_burnout_board_modal,
     build_burnout_loading_modal,
     build_cancel_modal,
@@ -57,6 +57,8 @@ from leave.requests import (
     create_request,
     decline_request,
     get_request,
+    half_day_dates,
+    pending_vacation_days,
     recompute_all_carry_in,
     remaining_balance,
     remaining_balances,
@@ -72,12 +74,13 @@ CANNOT_CANCEL = "That request can no longer be cancelled."
 NOT_ADMIN = "Sorry, /control is for admins only."
 ADVANCE_NOTHING = (
     "No vacation break to suggest right now — you may be out of vacation balance, "
-    "or have no open stretch left this year."
+    "have days awaiting approval, or have no open stretch left this year."
 )
 GROUP_NO_WINDOW = (
     "No window found where everyone can be off together in the rest of the year — "
     "try a smaller group or different people."
 )
+GROUP_HAS_BOT = "Pick real people — apps/bots can't take leave."
 
 
 def is_admin(user_id, admin_ids):
@@ -594,6 +597,15 @@ def open_leave_modal(ack, body, client, db, today=None):
     client.views_open(trigger_id=body["trigger_id"], view=build_leave_modal(balances))
 
 
+def _free_vacation_balance(db, employee, today):
+    """Vacation days truly free to book: remaining (approved-only) minus pending.
+    Pending counts as committed, so the optimizer never suggests over what's already
+    in flight — validate_request, the hard gate, stays approved-only (ADR-0008)."""
+    return remaining_balance(db, employee, "vacation", today) - pending_vacation_days(
+        db, employee["slack_user_id"], today
+    )
+
+
 def _suggest_breaks(db, employee, today):
     """Gather the optimizer's inputs from the db and return the caller's top
     distinct bookable vacation breaks this year (longest-first, up to 3). Sources
@@ -601,33 +613,32 @@ def _suggest_breaks(db, employee, today):
     same places the request flow uses, so every suggested break passes
     validate_request. Holidays span this year and the next so a late-year run can
     extend into January free days."""
-    balance = remaining_balance(db, employee, "vacation", today)
+    uid = employee["slack_user_id"]
+    balance = _free_vacation_balance(db, employee, today)
     holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
-    existing = active_full_leave_ranges(db, employee["slack_user_id"])
+    existing = active_full_leave_ranges(db, uid)
+    blocked = half_day_dates(db, uid)
     cap = get_policy(db)["consecutive_limit"]["vacation"]
-    return top_breaks(today, date(today.year, 12, 31), balance, holidays, existing, cap)
+    return top_breaks(
+        today, date(today.year, 12, 31), balance, holidays, existing, cap, blocked_dates=blocked
+    )
 
 
-def open_advance(ack, body, db, today=None):
-    """`/advance`: reply with the caller's top distinct vacation breaks (up to 3,
-    longest-first) they can still take this year, each with a Book button — or a
-    clear nothing-to-suggest note. Read-only and fast (no modal, no calendar), so
-    it acks the reply directly in both run modes."""
+def open_advance(ack, body, client, db, today=None):
+    """`/advance`: open a modal with the caller's top distinct vacation breaks (up to
+    3, longest-first) they can still take this year, each with a Book button and a
+    group-break button — or a clear nothing-to-suggest note. Read-only and fast (one
+    keyed modal open, no calendar/board work), so it runs synchronously in both run
+    modes; an unregistered caller just gets an ephemeral note."""
     today = today or date.today()
     employee = get_employee(db, body["user_id"])
     if employee is None:
         ack(CONTACT_ADMIN)
         return
     breaks = _suggest_breaks(db, employee, today)
-    if not breaks:
-        ack(ADVANCE_NOTHING)
-        return
-    ack(
-        {
-            "response_type": "ephemeral",
-            "text": "🌴 Your break options this year",
-            "blocks": build_advance_blocks(breaks),
-        }
+    ack()
+    client.views_open(
+        trigger_id=body["trigger_id"], view=build_advance_modal(breaks, ADVANCE_NOTHING)
     )
 
 
@@ -635,7 +646,10 @@ def open_book_modal(ack, body, client, db, today=None):
     """/advance Book button: open the apply modal pre-filled with the chosen
     break's vacation dates (`start|end` from the button value). No new write path
     — submitting runs the normal request flow, where validate_request is the
-    safety net for a break gone stale (e.g. balance changed) by submit time."""
+    safety net for a break gone stale (e.g. balance changed) by submit time. Pushed
+    onto the stack when clicked inside the /advance modal (body carries a `view`),
+    opened as a fresh root from the group-break DM message (book-one-and-done: the
+    whole stack closes on submit)."""
     ack()
     today = today or date.today()
     employee = get_employee(db, body["user"]["id"])
@@ -643,7 +657,8 @@ def open_book_modal(ack, body, client, db, today=None):
         return
     start, end = body["actions"][0]["value"].split("|")
     balances = remaining_balances(db, employee, today)
-    client.views_open(
+    show = client.views_push if body.get("view") else client.views_open
+    show(
         trigger_id=body["trigger_id"],
         view=build_leave_modal(
             balances, prefill={"leave_type": "vacation", "start": start, "end": end}
@@ -652,17 +667,21 @@ def open_book_modal(ack, body, client, db, today=None):
 
 
 def open_group_picker(ack, body, client):
-    """/advance 'Plan a group break' button: open the people-picker modal. Fast
-    (modal open only), so it runs synchronously in both run modes."""
+    """/advance 'Plan a group break' button: open the people-picker modal. The
+    button lives inside the /advance modal, so the picker is pushed onto the stack —
+    views_open is ignored mid-modal. Fast (modal only), so it runs synchronously."""
     ack()
-    client.views_open(trigger_id=body["trigger_id"], view=build_group_picker_modal())
+    show = client.views_push if body.get("view") else client.views_open
+    show(trigger_id=body["trigger_id"], view=build_group_picker_modal())
 
 
 def _gather_member(db, employee, today, holidays, cap):
+    uid = employee["slack_user_id"]
     return Member(
-        remaining_balance(db, employee, "vacation", today),
+        _free_vacation_balance(db, employee, today),
         cap,
-        active_full_leave_ranges(db, employee["slack_user_id"]),
+        active_full_leave_ranges(db, uid),
+        half_day_dates(db, uid),
     )
 
 
@@ -675,17 +694,30 @@ def _render_group_result(window):
     )
 
 
+def _picked_users(view):
+    return view["state"]["values"]["people"]["value"].get("selected_users") or []
+
+
+def _has_bot_pick(client, view):
+    """Whether any picked teammate is an app/bot. The user-picker can't hide them
+    (see _is_bot), so a group submit with one is rejected on submit."""
+    return any(_is_bot(client, uid) for uid in _picked_users(view))
+
+
 def submit_group_break_apply(body, view, client, db, today=None):
     """Post-ack work: gather the caller + picked people, find the longest window
     they can all be off together, and DM the caller the shareable result with a
     Book-mine button. Reveals only the window — never an individual's balance or
-    whose constraint bound it."""
+    whose constraint bound it. Bails on a bot pick (rejected in the ack with an
+    inline error; Lambda lazy listeners fire regardless of the ack, so re-check)."""
+    if _has_bot_pick(client, view):
+        return
     today = today or date.today()
     caller_id = body["user"]["id"]
     caller = get_employee(db, caller_id)
     if caller is None:
         return
-    picked = view["state"]["values"]["people"]["value"].get("selected_users") or []
+    picked = _picked_users(view)
     holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
     cap = get_policy(db)["consecutive_limit"]["vacation"]
     members = []
@@ -703,9 +735,22 @@ def submit_group_break_apply(body, view, client, db, today=None):
     )
 
 
+def submit_group_break_ack(ack, view, client):
+    """Ack phase (Lambda): reject a bot pick with an inline error so the picker stays
+    open, else ack to close. The lazy apply re-checks and bails (lazy listeners fire
+    regardless of the ack)."""
+    if _has_bot_pick(client, view):
+        ack(response_action="errors", errors={"people": GROUP_HAS_BOT})
+    else:
+        ack()
+
+
 def submit_group_break(ack, body, view, client, db, today=None):
-    """Synchronous submit (Socket Mode / tests): ack to close the modal, then
-    compute + DM the shared window."""
+    """Synchronous submit (Socket Mode / tests): reject a bot pick with an inline
+    error, else ack to close the modal and compute + DM the shared window."""
+    if _has_bot_pick(client, view):
+        ack(response_action="errors", errors={"people": GROUP_HAS_BOT})
+        return
     ack()
     submit_group_break_apply(body, view, client, db, today)
 

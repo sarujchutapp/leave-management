@@ -39,11 +39,13 @@ def _sort_key(brk):
     return (-brk.span_days, brk.cost, brk.book_start)
 
 
-def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap):
+def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, blocked_dates):
     """Every bookable break in [today, year_end]: a working-day-bounded booking
     that doesn't overlap existing leave, costs at most `balance`, spends no
     working day past `year_end`, and yields a continuous-absence span within
-    `cap` (so each always passes `validate_request`)."""
+    `cap` (so each always passes `validate_request`). `blocked_dates` are dates
+    that may not be booked (e.g. an existing half-day) but still bound a run like
+    any worked day — blocked-but-present."""
     if balance <= 0:
         return []
 
@@ -59,9 +61,10 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap):
     candidates = []
     b_start = today
     while b_start <= year_end:
-        # Start on a working day: a leading weekend/holiday is already non-working,
-        # so it would add nothing and only muddy the booked dates.
-        if not _is_working(b_start, holidays, existing_ranges):
+        # Start on a working, non-blocked day: a leading weekend/holiday is already
+        # non-working, so it would add nothing and only muddy the booked dates, and a
+        # blocked date can't be booked at all.
+        if not _is_working(b_start, holidays, existing_ranges) or b_start in blocked_dates:
             b_start += _ONE
             continue
 
@@ -69,7 +72,7 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap):
         # A span of L calendar days needs a booking no longer than L, and the span
         # can't exceed `cap`, so the booking can't either.
         while b_end <= year_end and (b_end - b_start).days < cap:
-            if overlaps_existing(b_start, b_end):
+            if overlaps_existing(b_start, b_end) or b_end in blocked_dates:
                 break
             ends_on_working = _is_working(b_end, holidays, existing_ranges)
             if ends_on_working:
@@ -112,14 +115,17 @@ def _distinct_options(a, b):
     return non_overlap > overlap
 
 
-def top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=3):
+def top_breaks(
+    today, year_end, balance, holidays, existing_ranges, cap, limit=3, blocked_dates=frozenset()
+):
     """Up to `limit` distinct break options, longest-first (then least quota,
     then earliest). Two options are kept apart only when their days-off spans
     differ on more days than they share (see `_distinct_options`); otherwise the
     better-ranked one is kept and the other dropped. Degrades to fewer (or none)
     when fewer distinct breaks exist."""
     ranked = sorted(
-        _all_candidates(today, year_end, balance, holidays, existing_ranges, cap), key=_sort_key
+        _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, blocked_dates),
+        key=_sort_key,
     )
     chosen = []
     for cand in ranked:
@@ -130,25 +136,31 @@ def top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=3
     return chosen
 
 
-def longest_break(today, year_end, balance, holidays, existing_ranges, cap):
+def longest_break(today, year_end, balance, holidays, existing_ranges, cap, blocked_dates=frozenset()):
     """The single longest continuous absence the caller can still book in
     [today, year_end], or None if nothing is bookable."""
-    best = top_breaks(today, year_end, balance, holidays, existing_ranges, cap, limit=1)
+    best = top_breaks(
+        today, year_end, balance, holidays, existing_ranges, cap, limit=1, blocked_dates=blocked_dates
+    )
     return best[0] if best else None
 
 
 # --- Group-break finder (the optimizer's second job) -------------------------
 
 # One person in a group-break search: their remaining vacation `balance`, their
-# consecutive `cap`, and their `existing_ranges` of full-day leave. Holidays are
-# company-wide and passed separately.
-Member = namedtuple("Member", "balance cap existing_ranges")
+# consecutive `cap`, their `existing_ranges` of full-day leave, and `blocked_dates`
+# they may not be off on (e.g. an existing half-day — present, so it also bounds a
+# run). Holidays are company-wide and passed separately.
+Member = namedtuple("Member", "balance cap existing_ranges blocked_dates", defaults=(frozenset(),))
 
 
 def _member_can_be_off(member, w_start, w_end, holidays):
-    """Whether `member` can be off for the whole window [w_start, w_end]: the new
-    vacation days it costs them fit their balance, and the continuous absence it
-    forms (window + their adjacent leave/weekends/holidays) stays within their cap."""
+    """Whether `member` can be off for the whole window [w_start, w_end]: the window
+    covers none of their blocked dates, the new vacation days it costs them fit their
+    balance, and the continuous absence it forms (window + their adjacent
+    leave/weekends/holidays) stays within their cap."""
+    if any(w_start <= d <= w_end for d in member.blocked_dates):
+        return False
     cost = 0
     d = w_start
     while d <= w_end:

@@ -75,6 +75,7 @@ from leave.handlers import (
     submit_clear_ack,
     submit_clear_apply,
     submit_group_break,
+    submit_group_break_ack,
     submit_group_break_apply,
     submit_holidays,
     submit_holidays_ack,
@@ -153,13 +154,13 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             open_cancel_modal(ack, body, client, d)
 
-    # /advance only reads (balance, holidays, leave, policy) and replies in the
-    # ack — no modal, no slow calendar/board work — so it runs synchronously in
-    # both run modes, like /control.
+    # /advance only reads (balance, holidays, leave, policy) and opens one keyed
+    # modal — no slow calendar/board work — so it runs synchronously in both run
+    # modes, like /control.
     @app.command("/advance")
-    def _advance(ack, body):
+    def _advance(ack, body, client):
         with db.connect() as d:
-            open_advance(ack, body, d)
+            open_advance(ack, body, client, d)
 
     # Book button on a suggested break: opens the apply modal pre-filled (needs
     # the trigger_id within 3s), so it runs synchronously like other modal opens.
@@ -321,13 +322,18 @@ def build_app(calendar=None, faas=False):
 
         app.view(HOLIDAYS_CALLBACK_ID)(ack=_holidays_ack, lazy=[_holidays_lazy])
 
-        # Group-break submit: ack closes the picker, then the multi-person search
-        # + DM run post-ack so the ack stays under 3s for larger groups.
+        # Group-break submit: the ack rejects a bot pick (inline error) or closes the
+        # picker, then the multi-person search + DM run post-ack so the ack stays
+        # under 3s for larger groups. The lazy apply re-checks bots (it fires
+        # regardless of the ack).
+        def _group_break_ack(ack, view, client):
+            submit_group_break_ack(ack, view, client)
+
         def _group_break_lazy(body, view, client):
             with db.connect() as d:
                 submit_group_break_apply(body, view, client, d)
 
-        app.view(GROUP_CALLBACK_ID)(ack=_ack, lazy=[_group_break_lazy])
+        app.view(GROUP_CALLBACK_ID)(ack=_group_break_ack, lazy=[_group_break_lazy])
 
         # /burnout: the manager gate + loading-modal open ack within 3s, then the
         # board (several record reads) is built + swapped in post-ack as a lazy
