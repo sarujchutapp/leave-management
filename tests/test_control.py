@@ -1111,6 +1111,32 @@ def test_report_history_without_person_is_rejected(db):
     assert client.files_upload_v2_calls == []
 
 
+def test_report_history_no_employees_error_on_report_type(db):
+    # No registered employees -> the modal shows a note, not a person block. The
+    # "pick a person" error must anchor on report_type (always present), not on the
+    # missing person block where Slack would silently drop it.
+    set_policy(db)
+    view = {
+        "state": {
+            "values": {
+                "report_type": {REPORT_TYPE_ACTION: {"selected_option": {"value": "history"}}},
+            }
+        }
+    }  # no "person" key — that block was never rendered
+    ack = FakeAck()
+    submit_report(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=view,
+        db=db,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "report_type" in ack.response["errors"]
+
+
 def test_report_non_admin_rejected(db):
     set_policy(db)
     upsert_employee(db, "U_A", "Alice", None)

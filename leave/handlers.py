@@ -536,7 +536,11 @@ def submit_report_ack(ack, body, view, admin_ids):
         return False
     report_type, person = _report_choice(view)
     if report_type == "history" and not person:
-        ack(response_action="errors", errors={"person": "Pick the person whose history you want."})
+        # With no registered employees the person picker isn't rendered, so anchor the
+        # error on report_type (always present) rather than a missing block, where
+        # Slack would silently drop it.
+        block = "person" if "person" in view["state"]["values"] else "report_type"
+        ack(response_action="errors", errors={block: "Pick the person whose history you want."})
         return False
     ack(response_action="clear")  # close the whole modal stack on success
     return True
