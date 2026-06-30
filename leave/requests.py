@@ -396,23 +396,46 @@ def _scan_all_requests(db):
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
-def clear_all_requests(db, calendar, sheets, today):
-    """Clean slate: delete every leave request and the artifacts it created — each
-    approved request's calendar event, the request rows themselves, and the saved
-    board. Employees, the central-policy item, holidays, and stored carry_in live
-    elsewhere and are untouched. Shared by /control Clear and clear_requests.py.
-    Returns the number of request rows deleted.
+def _wipe_all_carry_in(db):
+    """Strip stored carry_in from every employee — part of Clear's clean slate, so
+    no per-person carried-over days survive (ADR-0009). Skips the reserved items."""
+    scan_kwargs = {}
+    while True:
+        resp = db.employees.scan(**scan_kwargs)
+        for item in resp["Items"]:
+            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY):
+                continue
+            if "carry_in" in item:
+                db.employees.update_item(
+                    Key={"slack_user_id": item["slack_user_id"]},
+                    UpdateExpression="REMOVE carry_in",
+                )
+        if "LastEvaluatedKey" not in resp:
+            return
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
-    Order matters: the database wipe + board reset (the source of truth) run
-    FIRST, then the calendar cleanup. Calendar deletes are one slow HTTP call per
-    event and best-effort (an event already gone must not matter); doing them last
-    means a slow or timing-out calendar can never strand the database half-cleared
-    — which on Lambda would leave the rows behind while the events were removed."""
+
+def clear_all_requests(db, calendar, sheets, today, client=None):
+    """Clean slate: delete every leave request and the artifacts it created — each
+    approved request's calendar event, the request rows themselves, the saved board,
+    and every employee's stored carry_in. When a Slack `client` is given, also
+    withdraw each pending request's manager ticket so no orphan Approve/Decline
+    buttons remain (the operator script passes none — it has no Slack context, and a
+    stale click is handled gracefully by the approve/decline guards). Employees, the
+    central-policy item, and holidays are kept. Shared by /control Clear and
+    clear_requests.py. Returns the number of request rows deleted.
+
+    Order matters: the database wipe + board reset + carry_in wipe (the source of
+    truth) run FIRST, then the external cleanup. Calendar deletes and ticket
+    withdrawals are slow, best-effort HTTP calls (a thing already gone must not
+    matter); doing them last means a slow or timing-out API can never strand the
+    database half-cleared — which on Lambda would leave the rows behind."""
     items = _scan_all_requests(db)
     with db.requests.batch_writer() as bw:
         for it in items:
             bw.delete_item(Key={"request_id": it["request_id"]})
     reset_board(db, sheets, today)
+    _wipe_all_carry_in(db)
     for it in items:
         event_id = it.get("calendar_event_id")
         if event_id:
@@ -420,4 +443,24 @@ def clear_all_requests(db, calendar, sheets, today):
                 calendar.delete_event(event_id)
             except Exception:
                 logger.exception("calendar event %s delete failed during clear", event_id)
+    if client is not None:
+        for it in items:
+            if it.get("status") == "pending" and it.get("ticket_ts"):
+                try:
+                    client.chat_update(
+                        channel=it["ticket_channel"],
+                        ts=it["ticket_ts"],
+                        text="Request withdrawn",
+                        blocks=[
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": "This request was withdrawn — all leave was cleared.",
+                                },
+                            }
+                        ],
+                    )
+                except Exception:
+                    logger.exception("ticket withdraw failed during clear for %s", it["request_id"])
     return len(items)

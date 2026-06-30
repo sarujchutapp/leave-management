@@ -8,7 +8,10 @@ import json
 from datetime import date
 
 from leave.blocks import (
+    CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CONFIRM_WORD,
+    CONSECUTIVE_TOGGLE_ACTION,
+    HOLIDAYS_ACTION_SELECT,
     MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
     build_advance_modal,
@@ -35,7 +38,7 @@ from leave.blocks import (
 from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import employee_with_name, get_employee, list_employees, list_reports
-from leave.policy import get_policy, set_policy
+from leave.policy import DEFAULT_POLICY, get_policy, set_policy
 from leave.report import (
     build_burnout_csv,
     build_history_csv,
@@ -110,9 +113,15 @@ def open_view_settings(ack, body, client, db, admin_ids):
     client.views_push(trigger_id=body["trigger_id"], view=build_settings_view(get_policy(db)))
 
 
-# Block_ids of the leave-limits modal, also the keys of the parsed values. The
-# first three are per-type allowances; the last is the vacation consecutive limit.
-_LIMIT_FIELDS = ("sick", "vacation", "personal", "consecutive_limit")
+# Block_ids of the per-type allowance inputs in the leave-limits modal (also the keys
+# of the parsed values). The vacation consecutive limit is a separate, optional input.
+_ALLOWANCE_FIELDS = ("sick", "vacation", "personal")
+
+
+def _checkbox_on(values, block_id, action_id):
+    """Whether a single-option checkbox in a modal is ticked."""
+    selected = values.get(block_id, {}).get(action_id, {}).get("selected_options") or []
+    return len(selected) > 0
 
 
 def open_leave_limits(ack, body, client, db, admin_ids):
@@ -122,6 +131,22 @@ def open_leave_limits(ack, body, client, db, admin_ids):
     if not is_admin(body["user"]["id"], admin_ids):
         return
     client.views_push(trigger_id=body["trigger_id"], view=build_leave_limits_modal(get_policy(db)))
+
+
+def update_leave_limits_modal(ack, body, client, db, admin_ids):
+    """Enforce-consecutive-limit checkbox toggled: re-render the modal in place so the
+    number field shows only when the cap is enforced. Rebuilds from the stored policy
+    (unsaved edits revert — the modal is touched rarely); enabling from off seeds the
+    number with the shipped default."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    enforce = bool(body["actions"][0].get("selected_options"))
+    policy = get_policy(db)
+    value = DEFAULT_POLICY["consecutive_limit"]["vacation"] if enforce else None
+    if not enforce or policy["consecutive_limit"]["vacation"] is None:
+        policy = {**policy, "consecutive_limit": {"vacation": value}}
+    client.views_update(view_id=body["view"]["id"], view=build_leave_limits_modal(policy))
 
 
 def _parse_int(raw):
@@ -135,26 +160,59 @@ def _parse_int(raw):
     return n, None
 
 
-def submit_leave_limits(ack, body, view, client, db, admin_ids):
-    """Leave limits submit: re-check admin, validate every field, and on success
-    write the new allowances + consecutive limit. Reads the current policy to keep
-    the carry-over caps (set_policy overwrites the whole item) intact."""
-    if not is_admin(body["user"]["id"], admin_ids):
-        ack()
-        return
+def _parse_leave_limits(view, db):
+    """(allowances, consecutive_or_None, errors) for the leave-limits modal. Allowances
+    are required non-negative whole numbers; the consecutive limit is parsed only when
+    enforced (else None). Enforces Vacation allowance <= Max total (which lives in the
+    Carry-over modal, so it's checked here)."""
     values = view["state"]["values"]
     parsed, errors = {}, {}
-    for field in _LIMIT_FIELDS:
+    for field in _ALLOWANCE_FIELDS:
         n, err = _parse_int(values[field]["value"]["value"])
         if err:
             errors[field] = err
         else:
             parsed[field] = n
+    consecutive = None
+    if _checkbox_on(values, "enforce_consecutive", CONSECUTIVE_TOGGLE_ACTION):
+        consecutive, err = _parse_int(values["consecutive_limit"]["value"]["value"])
+        if err:
+            errors["consecutive_limit"] = err
+    max_total = get_policy(db)["max_total"]["vacation"]
+    if "vacation" in parsed and parsed["vacation"] > max_total:
+        errors["vacation"] = (
+            f"Vacation allowance can't exceed Max total ({max_total}). "
+            "Raise Max total in Carry-over first."
+        )
+    return parsed, consecutive, errors
+
+
+def submit_leave_limits_ack(ack, body, view, db, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate, closing the modal or returning
+    inline errors. The write + any carry-in recompute run post-ack."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return
+    _, _, errors = _parse_leave_limits(view, db)
     if errors:
         ack(response_action="errors", errors=errors)
+    else:
+        ack(response_action="clear")  # close the whole modal stack on success
+
+
+def submit_leave_limits_apply(body, view, db, client, admin_ids, today=None):
+    """Post-ack work: write the new allowances + consecutive limit, preserving the
+    carry-over caps. The base vacation allowance feeds carry_in, so when it changes we
+    rebuild every employee's stored carry_in (issue #8) — skipped otherwise. Re-checks
+    admin + validity because Lambda lazy listeners fire regardless of the ack result."""
+    today = today or date.today()
+    if not is_admin(body["user"]["id"], admin_ids):
         return
-    ack(response_action="clear")  # close the whole modal stack on success
+    parsed, consecutive, errors = _parse_leave_limits(view, db)
+    if errors:
+        return
     policy = get_policy(db)
+    vacation_changed = parsed["vacation"] != policy["allowances"]["vacation"]
     set_policy(
         db,
         allowances={
@@ -164,18 +222,24 @@ def submit_leave_limits(ack, body, view, client, db, admin_ids):
         },
         max_carry_over=policy["max_carry_over"],
         max_total=policy["max_total"],
-        consecutive_limit={"vacation": parsed["consecutive_limit"]},
+        consecutive_limit={"vacation": consecutive},
     )
-    _notify(
-        client,
-        body["user"]["id"],
+    msg = (
         f"✅ Leave limits updated — sick {parsed['sick']}, vacation {parsed['vacation']}, "
-        f"personal {parsed['personal']}, consecutive limit {parsed['consecutive_limit']}.",
+        f"personal {parsed['personal']}, consecutive limit "
+        f"{consecutive if consecutive is not None else 'off'}."
     )
+    if vacation_changed:
+        count = recompute_all_carry_in(db, today.year)
+        msg += f" Carry-in recomputed for {count} employee(s)."
+    _notify(client, body["user"]["id"], msg)
 
 
-# Block_ids of the carry-over modal (also the keys of the parsed values).
-_CARRY_FIELDS = ("max_carry_over", "max_total")
+def submit_leave_limits(ack, body, view, client, db, admin_ids, today=None):
+    """Synchronous submit (Socket Mode / tests): validate-and-ack, then apply."""
+    submit_leave_limits_ack(ack, body, view, db, admin_ids)
+    submit_leave_limits_apply(body, view, db, client, admin_ids, today)
+
 
 
 def open_carry_over(ack, body, client, db, admin_ids):
@@ -187,16 +251,49 @@ def open_carry_over(ack, body, client, db, admin_ids):
     client.views_push(trigger_id=body["trigger_id"], view=build_carry_over_modal(get_policy(db)))
 
 
-def _parse_carry_over(view):
-    """(parsed, errors) for the carry-over modal — non-negative whole numbers."""
+def update_carry_over_modal(ack, body, client, db, admin_ids):
+    """Enable-carry-over checkbox toggled: re-render in place so the Max carry over field
+    shows only when carry-over is on. Rebuilds from the stored policy (unsaved edits
+    revert — rarely touched); enabling from off seeds the field with the shipped default."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    enabled = bool(body["actions"][0].get("selected_options"))
+    policy = get_policy(db)
+    current = policy["max_carry_over"]["vacation"]
+    if enabled:
+        value = current if current > 0 else DEFAULT_POLICY["max_carry_over"]["vacation"]
+    else:
+        value = 0
+    policy = {**policy, "max_carry_over": {"vacation": value}}
+    client.views_update(view_id=body["view"]["id"], view=build_carry_over_modal(policy))
+
+
+def _parse_carry_over(view, db):
+    """(parsed, errors) for the carry-over modal. Max total is a required non-negative
+    whole number; max carry over is parsed only when "Enable carry-over" is ticked,
+    else it is 0 (carry-over disabled — nothing rolls over). Enforces the invariants
+    Max total >= vacation allowance and Max carry over <= Max total."""
     values = view["state"]["values"]
     parsed, errors = {}, {}
-    for field in _CARRY_FIELDS:
-        n, err = _parse_int(values[field]["value"]["value"])
+    max_total, err = _parse_int(values["max_total"]["value"]["value"])
+    if err:
+        errors["max_total"] = err
+    else:
+        parsed["max_total"] = max_total
+    if _checkbox_on(values, "enable_carry_over", CARRY_OVER_TOGGLE_ACTION):
+        mco, err = _parse_int(values["max_carry_over"]["value"]["value"])
         if err:
-            errors[field] = err
+            errors["max_carry_over"] = err
         else:
-            parsed[field] = n
+            parsed["max_carry_over"] = mco
+    else:
+        parsed["max_carry_over"] = 0
+    allowance = get_policy(db)["allowances"]["vacation"]
+    if "max_total" in parsed and parsed["max_total"] < allowance:
+        errors["max_total"] = f"Max total can't be below the vacation allowance ({allowance})."
+    elif "max_total" in parsed and "max_carry_over" in parsed and parsed["max_carry_over"] > parsed["max_total"]:
+        errors["max_carry_over"] = f"Max carry over can't exceed Max total ({parsed['max_total']})."
     return parsed, errors
 
 
@@ -206,7 +303,7 @@ def submit_carry_over_ack(ack, body, view, db, admin_ids):
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return False
-    parsed, errors = _parse_carry_over(view)
+    parsed, errors = _parse_carry_over(view, db)
     if errors:
         ack(response_action="errors", errors=errors)
         return False
@@ -230,7 +327,7 @@ def submit_carry_over_apply(body, view, db, client, admin_ids, today=None):
     today = today or date.today()
     if not is_admin(body["user"]["id"], admin_ids):
         return
-    _, errors = _parse_carry_over(view)
+    _, errors = _parse_carry_over(view, db)
     if errors:
         return
     count = recompute_all_carry_in(db, today.year)
@@ -283,7 +380,7 @@ def submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, toda
     today = today or date.today()
     if not is_admin(body["user"]["id"], admin_ids) or not _clear_confirmed(view):
         return
-    count = clear_all_requests(db, calendar, sheets, today)
+    count = clear_all_requests(db, calendar, sheets, today, client=client)
     _notify(
         client,
         body["user"]["id"],
@@ -308,6 +405,17 @@ def open_holidays(ack, body, client, db, admin_ids):
     )
 
 
+def _holiday_action(view):
+    return (
+        view["state"]["values"]
+        .get("holiday_action", {})
+        .get(HOLIDAYS_ACTION_SELECT, {})
+        .get("selected_option", {})
+        .get("value")
+        or "add"
+    )
+
+
 def _parse_holiday_submission(view):
     """(date_or_None, label_or_None, remove_iso_or_None) from the holidays modal."""
     values = view["state"]["values"]
@@ -319,36 +427,55 @@ def _parse_holiday_submission(view):
     return d, label, remove
 
 
+def update_holidays_modal(ack, body, client, db, admin_ids):
+    """Action select changed: re-render the modal in place so only the chosen mode's
+    fields show (Add → date + label, Remove → the current-holidays dropdown)."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    action = body["actions"][0]["selected_option"]["value"]
+    client.views_update(
+        view_id=body["view"]["id"], view=build_holidays_modal(all_holidays(db), action)
+    )
+
+
 def submit_holidays_ack(ack, body, view, admin_ids):
-    """Ack phase (under 3s): re-check admin and validate that exactly one action is
-    specified — a holiday to remove, or a date + label to add. Returns True when
-    valid so the caller runs the calendar+store change post-ack."""
+    """Ack phase (under 3s): re-check admin and validate the chosen mode's fields — Add
+    needs a date + label, Remove needs a holiday picked. Returns True when valid so the
+    caller runs the calendar+store change post-ack."""
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return False
     d, label, remove = _parse_holiday_submission(view)
-    if remove or (d and label):
-        ack(response_action="clear")  # close the whole modal stack on success
-        return True
-    if d and not label:
-        errors = {"holiday_label": "Add a label for the holiday."}
-    elif label and not d:
-        errors = {"holiday_date": "Pick the holiday's date."}
-    else:
-        errors = {"holiday_date": "Pick a holiday to remove, or enter a date and label to add."}
-    ack(response_action="errors", errors=errors)
-    return False
+    if _holiday_action(view) == "remove":
+        if remove:
+            ack(response_action="clear")  # close the whole modal stack on success
+            return True
+        ack(response_action="errors", errors={"holiday_remove": "Pick a holiday to remove."})
+        return False
+    errors = {}
+    if not d:
+        errors["holiday_date"] = "Pick the holiday's date."
+    if not label:
+        errors["holiday_label"] = "Add a label for the holiday."
+    if errors:
+        ack(response_action="errors", errors=errors)
+        return False
+    ack(response_action="clear")  # close the whole modal stack on success
+    return True
 
 
 def submit_holidays_apply(body, view, db, calendar, client, admin_ids):
-    """Post-ack work: apply the add (create/update the calendar event + store) or
-    the remove (delete the event + entry), then DM the admin. Re-checks admin +
-    validity because Lambda lazy listeners fire regardless of the ack result."""
+    """Post-ack work: apply the add (create the calendar event + store) or the remove
+    (delete the event + entry), then DM the admin. Re-checks admin + validity because
+    Lambda lazy listeners fire regardless of the ack result."""
     if not is_admin(body["user"]["id"], admin_ids):
         return
     d, label, remove = _parse_holiday_submission(view)
     user_id = body["user"]["id"]
-    if remove:
+    if _holiday_action(view) == "remove":
+        if not remove:
+            return
         removed = delete_holiday(db, date.fromisoformat(remove))
         if removed and removed.get("calendar_event_id"):
             calendar.delete_event(removed["calendar_event_id"])
@@ -406,7 +533,11 @@ def submit_report_ack(ack, body, view, admin_ids):
         return False
     report_type, person = _report_choice(view)
     if report_type == "history" and not person:
-        ack(response_action="errors", errors={"person": "Pick the person whose history you want."})
+        # With no registered employees the person picker isn't rendered, so anchor the
+        # error on report_type (always present) rather than a missing block, where
+        # Slack would silently drop it.
+        block = "person" if "person" in view["state"]["values"] else "report_type"
+        ack(response_action="errors", errors={block: "Pick the person whose history you want."})
         return False
     ack(response_action="clear")  # close the whole modal stack on success
     return True
@@ -480,12 +611,33 @@ def open_manage_employees(ack, body, client, admin_ids):
 
 def update_manage_modal(ack, body, client, admin_ids):
     """Action select changed: re-render the modal in place so only the chosen action's
-    fields show (Add/edit → name + manager, Set override → allowances, Delete → none)."""
+    fields show (Add/edit → name + manager, Set override → allowances, Delete → none).
+    Keeps the picked employee selected so their prefill survives the switch."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     action = body["actions"][0]["selected_option"]["value"]
-    client.views_update(view_id=body["view"]["id"], view=build_manage_employees_modal(action))
+    values = body.get("view", {}).get("state", {}).get("values", {})
+    selected = _value(values, "employee").get("selected_user")
+    client.views_update(
+        view_id=body["view"]["id"], view=build_manage_employees_modal(action, selected_user=selected)
+    )
+
+
+def prefill_manage_employee(ack, body, client, db, admin_ids):
+    """Employee picked: re-render the modal with that registered employee's current
+    name/manager/override prefilled (blank for someone not yet in the system), keeping
+    them selected. Turns "Add / edit" into real editing and a way to view current values."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    selected = body["actions"][0].get("selected_user")
+    action = _manage_action(body["view"]["state"]["values"])
+    employee = get_employee(db, selected) if selected else None
+    client.views_update(
+        view_id=body["view"]["id"],
+        view=build_manage_employees_modal(action, selected_user=selected, employee=employee),
+    )
 
 
 def _value(values, block_id):
@@ -520,46 +672,62 @@ def _is_bot(client, user_id):
     return bool(info.get("is_bot") or info.get("is_app_user")) or user_id == "USLACKBOT"
 
 
-def submit_manage_employees(ack, body, view, client, db, admin_ids):
-    """Add/edit, set an allowance override, or delete an employee, per the chosen
-    Action. Delete is block-and-tell: if the target still manages anyone, the submit
-    is rejected naming those reports — nothing deleted, no automatic re-parenting."""
-    if not is_admin(body["user"]["id"], admin_ids):
-        ack()
-        return
-    values = view["state"]["values"]
-    target = _value(values, "employee").get("selected_user")
-    action = _manage_action(values)
+EMPLOYEE_REMOVED_WITHDRAW = (
+    "This request was withdrawn — the employee was removed from the leave system."
+)
+MANAGER_CHANGED_WITHDRAW = (
+    "This request was withdrawn — the employee's manager changed; they'll re-file."
+)
 
+
+def _withdraw_ticket(client, request, text):
+    """Replace a pending request's manager ticket so its Approve/Decline buttons vanish."""
+    if request.get("ticket_ts"):
+        client.chat_update(
+            channel=request["ticket_channel"],
+            ts=request["ticket_ts"],
+            text="Request withdrawn",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+        )
+
+
+def _settle_in_flight_leave(
+    db, client, calendar, sheets, employee_id, withdraw_text, today, include_approved
+):
+    """Cancel this employee's still-open requests, cleaning up each artifact so nothing
+    dangles: a pending request's manager ticket is withdrawn. When `include_approved`
+    (a full removal), a future-approved request is also cancelled and its calendar event
+    and board entry removed; otherwise (a manager change) approved leave is left intact,
+    since it needs no further manager action. Past (taken) leave is always kept as
+    history. Returns the number of pending requests withdrawn."""
+    pending = 0
+    for request in cancellable_requests(db, employee_id, today):
+        if request["status"] == "pending":
+            cancel_request(db, request["request_id"])
+            pending += 1
+            _withdraw_ticket(client, request, withdraw_text)
+        elif include_approved:  # future-approved: drop its calendar event and board entry
+            cancel_request(db, request["request_id"])
+            if request["calendar_event_id"]:
+                calendar.delete_event(request["calendar_event_id"])
+            update_board(db, client, today, sheets, remove_request_id=request["request_id"])
+    return pending
+
+
+def _manage_errors(values, client, db, target, action):
+    """Inline-error validation shared by the ack and apply phases (empty dict = valid).
+    Delete is block-and-tell (a person still managing anyone is rejected naming those
+    reports); save requires a unique name + a manager, neither an app/bot."""
     if action == "delete":
         reports = [r for r in list_reports(db, target) if r["slack_user_id"] != target]
         if reports:
             names = ", ".join(sorted(r.get("real_name", r["slack_user_id"]) for r in reports))
-            ack(
-                response_action="errors",
-                errors={
-                    "employee": f"Still the manager of {names}. Re-assign them first, then delete."
-                },
-            )
-            return
-        ack(response_action="clear")  # close the whole modal stack on success
-        delete_employee(db, target)
-        _notify(client, body["user"]["id"], f"🗑️ Removed <@{target}> from the leave system.")
-        return
-
+            return {"employee": f"Still the manager of {names}. Re-assign them first, then delete."}
+        return {}
     if action == "override":
-        overrides, errors = _parse_overrides(values)
-        if errors:
-            ack(response_action="errors", errors=errors)
-            return
-        ack(response_action="clear")
-        set_allowance_override(db, target, overrides)
-        what = "set" if overrides else "cleared"
-        _notify(client, body["user"]["id"], f"✅ Allowance override {what} for <@{target}>.")
-        return
-
-    # save (add / edit): name + manager, both required. Manager = the person
-    # themselves marks them top of chain (their leave auto-approves).
+        _, errors = _parse_overrides(values)
+        return errors
+    # save (add / edit)
     name = (_value(values, "name").get("value") or "").strip()
     manager = _value(values, "manager").get("selected_user")
     errors = {}
@@ -571,19 +739,95 @@ def submit_manage_employees(ack, body, view, client, db, admin_ids):
     if name and employee_with_name(db, name, exclude_id=target):
         errors["name"] = "That name is already used by another employee — pick a distinct name."
     if errors:
-        ack(response_action="errors", errors=errors)
-        return
+        return errors
     # The user-picker always lists the app/Slackbot; block adding one as an employee
     # or manager (Slack gives no way to hide them from the picker itself).
     if _is_bot(client, target):
-        ack(response_action="errors", errors={"employee": "Pick a real person — that's an app/bot."})
-        return
+        return {"employee": "Pick a real person — that's an app/bot."}
     if manager != target and _is_bot(client, manager):
-        ack(response_action="errors", errors={"manager": "Pick a real person — that's an app/bot."})
+        return {"manager": "Pick a real person — that's an app/bot."}
+    return {}
+
+
+def submit_manage_employees_ack(ack, body, view, client, db, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate, returning inline errors or
+    closing the modal. The work (which can make slow Slack/calendar calls when leave
+    is settled) runs post-ack in submit_manage_employees_apply."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
         return
-    ack(response_action="clear")  # close the whole modal stack on success
+    values = view["state"]["values"]
+    target = _value(values, "employee").get("selected_user")
+    action = _manage_action(values)
+    errors = _manage_errors(values, client, db, target, action)
+    if errors:
+        ack(response_action="errors", errors=errors)
+    else:
+        ack(response_action="clear")  # close the whole modal stack on success
+
+
+def submit_manage_employees_apply(
+    body, view, client, db, admin_ids, calendar=None, sheets=None, today=None
+):
+    """Post-ack work: do the add/edit, override, or delete, settling in-flight leave
+    when a person is removed or re-orged (ADR-0009). Re-checks admin + validity because
+    Lambda lazy listeners fire regardless of the ack result; an invalid submission is
+    dropped (the user already saw the error)."""
+    today = today or date.today()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    values = view["state"]["values"]
+    target = _value(values, "employee").get("selected_user")
+    action = _manage_action(values)
+    if _manage_errors(values, client, db, target, action):
+        return
+
+    if action == "delete":
+        _settle_in_flight_leave(
+            db, client, calendar, sheets, target, EMPLOYEE_REMOVED_WITHDRAW, today,
+            include_approved=True,
+        )
+        delete_employee(db, target)
+        _notify(client, body["user"]["id"], f"🗑️ Removed <@{target}> from the leave system.")
+        return
+
+    if action == "override":
+        overrides, _ = _parse_overrides(values)
+        set_allowance_override(db, target, overrides)
+        what = "set" if overrides else "cleared"
+        _notify(client, body["user"]["id"], f"✅ Allowance override {what} for <@{target}>.")
+        return
+
+    # save (add / edit): name + manager. Manager = the person themselves marks them top
+    # of chain (their leave auto-approves). A manager change strands the employee's
+    # pending tickets (they sit in the old manager's DM, but the approver check reads
+    # the new manager), so settle them and ask the employee to re-file; approved leave
+    # is unaffected. Detected before the write so we can compare against the stored
+    # manager.
+    name = (_value(values, "name").get("value") or "").strip()
+    manager = _value(values, "manager").get("selected_user")
+    existing = get_employee(db, target)
+    manager_changed = existing is not None and existing["manager_id"] != manager
     upsert_employee(db, target, name, manager, allowances=None)
     _notify(client, body["user"]["id"], f"✅ Saved {name} (<@{target}>).")
+    if manager_changed:
+        withdrawn = _settle_in_flight_leave(
+            db, client, calendar, sheets, target, MANAGER_CHANGED_WITHDRAW, today,
+            include_approved=False,
+        )
+        if withdrawn:
+            _notify(
+                client,
+                target,
+                f"Your manager is now <@{manager}>. {withdrawn} pending request(s) were "
+                "withdrawn — please re-file them so they reach the right approver.",
+            )
+
+
+def submit_manage_employees(ack, body, view, client, db, admin_ids, calendar=None, sheets=None, today=None):
+    """Synchronous submit (Socket Mode / tests): validate-and-ack, then apply."""
+    submit_manage_employees_ack(ack, body, view, client, db, admin_ids)
+    submit_manage_employees_apply(body, view, client, db, admin_ids, calendar, sheets, today)
 
 
 def open_leave_modal(ack, body, client, db, today=None):
@@ -1035,12 +1279,37 @@ def _close_stale_ticket(client, channel, ts, request):
     )
 
 
+def _close_dead_ticket(client, channel, ts):
+    """A decision was attempted on a request whose row is gone — Clear wiped it, or
+    the employee was removed. Replace the ticket so its buttons vanish."""
+    client.chat_update(
+        channel=channel,
+        ts=ts,
+        text="No longer available",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "This request is no longer available — no action taken.",
+                },
+            }
+        ],
+    )
+
+
 def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
     request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
+    if request is None:
+        _close_dead_ticket(client, body["channel"]["id"], body["message"]["ts"])
+        return
     employee = get_employee(db, request["employee_id"])
+    if employee is None:
+        _close_dead_ticket(client, body["channel"]["id"], body["message"]["ts"])
+        return
 
     if body["user"]["id"] != employee["manager_id"]:
         _notify(client, body["user"]["id"], NOT_APPROVER)
@@ -1118,7 +1387,13 @@ def handle_decline_submit(ack, body, view, client, db):
     reason = view["state"]["values"]["decline_reason"]["value"].get("value")
 
     request = get_request(db, request_id)
+    if request is None:
+        _close_dead_ticket(client, meta["channel"], meta["ts"])
+        return
     employee = get_employee(db, request["employee_id"])
+    if employee is None:
+        _close_dead_ticket(client, meta["channel"], meta["ts"])
+        return
     if body["user"]["id"] != employee["manager_id"]:
         return
     if request["status"] != "pending":

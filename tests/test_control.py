@@ -4,9 +4,12 @@ from datetime import date
 
 from leave.blocks import (
     CARRY_OVER_CALLBACK_ID,
+    CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CALLBACK_ID,
     CONTROL_MENU_CALLBACK_ID,
+    HOLIDAYS_ACTION_SELECT,
     HOLIDAYS_CALLBACK_ID,
+    CONSECUTIVE_TOGGLE_ACTION,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_ACTION_SELECT,
@@ -30,12 +33,16 @@ from leave.handlers import (
     open_manage_employees,
     open_report,
     open_view_settings,
+    update_carry_over_modal,
+    update_leave_limits_modal,
     submit_carry_over,
     submit_clear,
     submit_holidays,
     submit_leave_limits,
     submit_manage_employees,
     submit_report,
+    prefill_manage_employee,
+    update_holidays_modal,
     update_manage_modal,
     update_report_modal,
 )
@@ -51,8 +58,9 @@ from leave.requests import (
     remaining_balance,
     remaining_balances,
     set_calendar_event_id,
+    set_ticket_ref,
 )
-from leave.seed import upsert_employee
+from leave.seed import set_allowance_override, upsert_employee
 from tests.fakes import FakeAck, FakeCalendar, FakeSheets, FakeSlackClient
 
 ADMINS = {"U_ADMIN"}
@@ -64,7 +72,7 @@ def _input_initial(view, block_id):
     return block["element"].get("initial_value")
 
 
-def _leave_limits_view(sick, vacation, personal, consecutive):
+def _leave_limits_view(sick, vacation, personal, consecutive, enforce_consecutive=True):
     """A view_submission state payload matching build_leave_limits_modal."""
     return {
         "state": {
@@ -73,18 +81,28 @@ def _leave_limits_view(sick, vacation, personal, consecutive):
                 "vacation": {"value": {"value": str(vacation)}},
                 "personal": {"value": {"value": str(personal)}},
                 "consecutive_limit": {"value": {"value": str(consecutive)}},
+                "enforce_consecutive": {
+                    CONSECUTIVE_TOGGLE_ACTION: {
+                        "selected_options": [{"value": "on"}] if enforce_consecutive else []
+                    }
+                },
             }
         }
     }
 
 
-def _carry_over_view(max_carry_over, max_total):
+def _carry_over_view(max_carry_over, max_total, enable=True):
     """A view_submission state payload matching build_carry_over_modal."""
     return {
         "state": {
             "values": {
                 "max_carry_over": {"value": {"value": str(max_carry_over)}},
                 "max_total": {"value": {"value": str(max_total)}},
+                "enable_carry_over": {
+                    CARRY_OVER_TOGGLE_ACTION: {
+                        "selected_options": [{"value": "on"}] if enable else []
+                    }
+                },
             }
         }
     }
@@ -127,8 +145,12 @@ def _manage_view(employee, action="save", name=None, manager=None, overrides=Non
 
 
 def _menu_action_ids(view):
-    actions = next(b for b in view["blocks"] if b["type"] == "actions")
-    return {e["action_id"] for e in actions["elements"]}
+    return {
+        e["action_id"]
+        for b in view["blocks"]
+        if b["type"] == "actions"
+        for e in b["elements"]
+    }
 
 
 def test_is_admin_recognises_allowlist_members():
@@ -171,6 +193,20 @@ def test_admin_control_opens_menu_listing_actions():
     assert REPORT_ACTION in action_ids
 
 
+def test_control_menu_splits_buttons_to_avoid_overflow(db):
+    # Slack collapses >5 buttons in one actions block into a "…" overflow, hiding some.
+    # Spread them across actions blocks (<=5 each) so every action shows inline.
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_control_menu(
+        ack=ack, body={"user_id": "U_ADMIN", "trigger_id": "T"}, client=client, admin_ids=ADMINS
+    )
+    view = client.views_open_calls[0]["view"]
+    action_blocks = [b for b in view["blocks"] if b["type"] == "actions"]
+    assert action_blocks and all(len(b["elements"]) <= 5 for b in action_blocks)
+    assert len(_menu_action_ids(view)) == 7  # all admin actions present, none collapsed
+
+
 def test_view_settings_renders_current_policy(db):
     set_policy(
         db,
@@ -200,6 +236,29 @@ def test_view_settings_renders_current_policy(db):
     assert "6" in text  # max carry over
     assert "16" in text  # max total
     assert "14" in text  # consecutive limit
+
+
+def test_view_settings_shows_disabled_caps(db):
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 12, "personal": 5},
+        max_carry_over={"vacation": 0},
+        max_total={"vacation": 16},
+        consecutive_limit={"vacation": None},
+    )
+    client = FakeSlackClient()
+    open_view_settings(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    text = " ".join(
+        b["text"]["text"] for b in client.views_push_calls[0]["view"]["blocks"] if b["type"] == "section"
+    )
+    assert "No limit" in text  # consecutive limit off
+    assert "disabled" in text.lower()  # carry-over off
 
 
 def test_view_settings_rejects_non_admin(db):
@@ -244,6 +303,64 @@ def test_leave_limits_modal_prefilled_with_current_policy(db):
     assert _input_initial(view, "consecutive_limit") == "14"
 
 
+def test_leave_limits_modal_hides_consecutive_when_disabled(db):
+    # With the cap off (None), the modal opens with the checkbox unchecked and the
+    # number field hidden (render-from-state).
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        consecutive_limit={"vacation": None},
+    )
+    client = FakeSlackClient()
+    open_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_push_calls[0]["view"]
+    ids = {b.get("block_id") for b in view["blocks"]}
+    assert "enforce_consecutive" in ids  # checkbox present
+    assert "consecutive_limit" not in ids  # number hidden when off
+    checkbox = next(b for b in view["blocks"] if b.get("block_id") == "enforce_consecutive")
+    assert "initial_options" not in checkbox["element"]  # unchecked
+
+
+def test_leave_limits_toggle_consecutive_rerenders(db):
+    # Toggling the checkbox re-renders in place: enabling shows the number field,
+    # disabling hides it.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        consecutive_limit={"vacation": None},
+    )
+    client = FakeSlackClient()
+    update_leave_limits_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_options": [{"value": "on"}]}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert client.views_update_calls[0]["view_id"] == "V1"
+    assert "consecutive_limit" in {
+        b.get("block_id") for b in client.views_update_calls[0]["view"]["blocks"]
+    }
+    update_leave_limits_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_options": []}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert "consecutive_limit" not in {
+        b.get("block_id") for b in client.views_update_calls[1]["view"]["blocks"]
+    }
+
+
 def test_leave_limits_submit_updates_policy(db):
     set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
     client = FakeSlackClient()
@@ -265,7 +382,8 @@ def test_leave_limits_submit_updates_policy(db):
 
 def test_leave_limits_change_flows_live_into_balances(db):
     upsert_employee(db, "U_E", "Eve", None)
-    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
+    # Max total >= the new allowance so the invariant is satisfied.
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_total={"vacation": 20})
     submit_leave_limits(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
@@ -300,6 +418,20 @@ def test_leave_limits_preserves_carry_over_caps(db):
     assert p["max_total"]["vacation"] == 16
 
 
+def test_leave_limits_disable_consecutive_stores_none(db):
+    # Unchecking "Enforce consecutive limit" stores None (no cap), ignoring the number.
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, consecutive_limit={"vacation": 15})
+    submit_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(30, 10, 5, 15, enforce_consecutive=False),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert get_policy(db)["consecutive_limit"]["vacation"] is None
+
+
 def test_leave_limits_invalid_input_writes_nothing(db):
     set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
     ack = FakeAck()
@@ -315,6 +447,74 @@ def test_leave_limits_invalid_input_writes_nothing(db):
     assert set(ack.response["errors"]) == {"sick", "vacation"}
     # Nothing written: policy unchanged.
     assert get_policy(db)["allowances"] == {"sick": 30, "vacation": 10, "personal": 5}
+
+
+def test_leave_limits_vacation_allowance_capped_by_max_total(db):
+    # A vacation allowance above the stored Max total would silently cap everyone below
+    # it — block it (the cross-modal invariant from grilling #2).
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_leave_limits(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(30, 20, 5, 15),  # vacation 20 > max total 15
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "vacation" in ack.response["errors"]
+    assert get_policy(db)["allowances"]["vacation"] == 10  # nothing written
+
+
+def test_leave_limits_vacation_change_recomputes_carry_in(db):
+    # carry_in is fed by the base vacation allowance, so changing it must rebuild
+    # stored carry_in (issue #8) — like the carry-over modal already does.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 20},
+        max_total={"vacation": 40},
+    )
+    _seed_carry_2027(db, "U_A")
+    before = get_employee(db, "U_A")["carry_in"]["2027"]
+    submit_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(30, 30, 5, 15),  # vacation 10 -> 30
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    after = get_employee(db, "U_A")["carry_in"]["2027"]
+    assert before == 10 and after == 20  # recomputed under the new allowance
+
+
+def test_leave_limits_non_vacation_change_skips_recompute(db):
+    # Changing only sick/personal/consecutive must not disturb stored carry_in.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 20},
+        max_total={"vacation": 40},
+    )
+    _seed_carry_2027(db, "U_A")
+    db.employees.update_item(  # tamper so a recompute would visibly change it
+        Key={"slack_user_id": "U_A"},
+        UpdateExpression="SET carry_in = :c",
+        ExpressionAttributeValues={":c": {"2027": 99}},
+    )
+    submit_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(28, 10, 7, 15),  # vacation unchanged at 10
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert get_employee(db, "U_A")["carry_in"]["2027"] == 99  # untouched
 
 
 def test_leave_limits_non_admin_submit_rejected(db):
@@ -351,6 +551,50 @@ def test_carry_over_modal_prefilled_with_current_caps(db):
     assert view["callback_id"] == CARRY_OVER_CALLBACK_ID
     assert _input_initial(view, "max_carry_over") == "7"
     assert _input_initial(view, "max_total") == "18"
+
+
+def test_carry_over_modal_hides_field_when_disabled(db):
+    # max_carry_over 0 = carry-over off: checkbox unchecked, max carry over field
+    # hidden, max total still shown.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 0},
+        max_total={"vacation": 15},
+    )
+    client = FakeSlackClient()
+    open_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    ids = {b.get("block_id") for b in client.views_push_calls[0]["view"]["blocks"]}
+    assert "enable_carry_over" in ids
+    assert "max_carry_over" not in ids  # hidden when disabled
+    assert "max_total" in ids  # always shown
+
+
+def test_carry_over_toggle_rerenders(db):
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 0},
+        max_total={"vacation": 15},
+    )
+    client = FakeSlackClient()
+    update_carry_over_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_options": [{"value": "on"}]}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert "max_carry_over" in {
+        b.get("block_id") for b in client.views_update_calls[0]["view"]["blocks"]
+    }
 
 
 def test_carry_over_submit_updates_policy_preserving_allowances(db):
@@ -417,6 +661,54 @@ def test_recompute_all_carry_in_skips_policy_item(db):
     policy_item = db.employees.get_item(Key={"slack_user_id": POLICY_KEY}).get("Item")
     assert "carry_in" not in policy_item
     assert get_employee(db, "U_A")["carry_in"]["2027"] == 5
+
+
+def test_carry_over_disable_stores_zero(db):
+    # Unchecking "Enable carry-over" stores max_carry_over 0 (nothing rolls over).
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_carry_over={"vacation": 5}, max_total={"vacation": 15})
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, enable=False),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert get_policy(db)["max_carry_over"]["vacation"] == 0
+
+
+def test_carry_over_max_total_below_allowance_blocked(db):
+    set_policy(db, allowances={"sick": 30, "vacation": 12, "personal": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 10),  # max total 10 < vacation allowance 12
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "max_total" in ack.response["errors"]
+    assert get_policy(db)["max_total"]["vacation"] == 15  # unchanged
+
+
+def test_carry_over_exceeding_max_total_blocked(db):
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_carry_over={"vacation": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(20, 15),  # max carry over 20 > max total 15
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "max_carry_over" in ack.response["errors"]
 
 
 def test_carry_over_invalid_input_writes_nothing(db):
@@ -525,6 +817,29 @@ def test_clear_correct_word_wipes_and_preserves_the_rest(db):
     assert get_employee(db, "U_A") is not None
     assert get_policy(db)["allowances"]["vacation"] == 10
     assert date(2026, 1, 1) in holidays_for_year(db, 2026)
+
+
+def test_clear_wipes_carry_in(db):
+    # Clear is a true clean slate (ADR-0009): stored carry-in is wiped too, so
+    # everyone resets to base allowance.
+    set_policy(db)
+    _seed_carry_2027(db, "U_A")
+    assert "carry_in" in get_employee(db, "U_A")
+    clear_all_requests(db, FakeCalendar(), FakeSheets(), TODAY)
+    assert "carry_in" not in get_employee(db, "U_A")
+
+
+def test_clear_withdraws_pending_tickets(db):
+    # Clear deletes pending rows; it also switches off the manager's still-open
+    # ticket so no orphan Approve/Decline buttons remain.
+    upsert_employee(db, "U_A", "A", "U_M")
+    rid = create_request(db, "U_A", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, rid, "C_MGR", "999.9")
+    client = FakeSlackClient()
+    clear_all_requests(db, FakeCalendar(), FakeSheets(), TODAY, client=client)
+    assert any(
+        c["channel"] == "C_MGR" and c["ts"] == "999.9" for c in client.chat_update_calls
+    )
 
 
 def test_clear_non_admin_is_rejected(db):
@@ -814,6 +1129,32 @@ def test_report_history_without_person_is_rejected(db):
     assert client.files_upload_v2_calls == []
 
 
+def test_report_history_no_employees_error_on_report_type(db):
+    # No registered employees -> the modal shows a note, not a person block. The
+    # "pick a person" error must anchor on report_type (always present), not on the
+    # missing person block where Slack would silently drop it.
+    set_policy(db)
+    view = {
+        "state": {
+            "values": {
+                "report_type": {REPORT_TYPE_ACTION: {"selected_option": {"value": "history"}}},
+            }
+        }
+    }  # no "person" key — that block was never rendered
+    ack = FakeAck()
+    submit_report(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=view,
+        db=db,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "report_type" in ack.response["errors"]
+
+
 def test_report_non_admin_rejected(db):
     set_policy(db)
     upsert_employee(db, "U_A", "Alice", None)
@@ -872,6 +1213,47 @@ def test_manage_modal_action_toggles_fields(db):
     ids2 = _manage_block_ids(client.views_update_calls[1]["view"])
     assert {"employee", "action"} <= ids2
     assert not ({"name", "manager", "override_sick"} & ids2)
+
+
+def _pick_body(selected_user, action="save"):
+    return {
+        "user": {"id": "U_ADMIN"},
+        "view": {"id": "V1", "state": {"values": {
+            "action": {MANAGE_ACTION_SELECT: {"selected_option": {"value": action}}}}}},
+        "actions": [{"selected_user": selected_user}],
+    }
+
+
+def test_manage_employee_pick_prefills_current_values(db):
+    # Picking a registered employee re-renders the modal with their current name,
+    # manager, and selection filled in (so "edit" shows what you're editing).
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    client = FakeSlackClient()
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_E"), client=client, db=db, admin_ids=ADMINS)
+    view = client.views_update_calls[0]["view"]
+    blocks = {b.get("block_id"): b for b in view["blocks"]}
+    assert blocks["name"]["element"].get("initial_value") == "Eve"
+    assert blocks["manager"]["element"].get("initial_user") == "U_MGR"
+    assert blocks["employee"]["element"].get("initial_user") == "U_E"  # selection kept
+
+
+def test_manage_employee_pick_unregistered_is_blank(db):
+    client = FakeSlackClient()
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_NEW"), client=client, db=db, admin_ids=ADMINS)
+    blocks = {b.get("block_id"): b for b in client.views_update_calls[0]["view"]["blocks"]}
+    assert "initial_value" not in blocks["name"]["element"]  # fresh add → blank
+    assert blocks["employee"]["element"].get("initial_user") == "U_NEW"  # but selection kept
+
+
+def test_manage_employee_pick_prefills_override(db):
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    set_allowance_override(db, "U_E", {"vacation": 15})
+    client = FakeSlackClient()
+    prefill_manage_employee(
+        ack=FakeAck(), body=_pick_body("U_E", action="override"), client=client, db=db, admin_ids=ADMINS
+    )
+    blocks = {b.get("block_id"): b for b in client.views_update_calls[0]["view"]["blocks"]}
+    assert blocks["override_vacation"]["element"].get("initial_value") == "15"
 
 
 def test_manage_add_creates_employee(db):
@@ -1029,6 +1411,62 @@ def test_manage_edit_updates_name_and_manager(db):
     assert emp["manager_id"] == "U_NEW_MGR"
 
 
+def test_manage_edit_manager_change_settles_pending_only(db):
+    # Changing the manager strands a pending ticket (it sits in the OLD manager's DM,
+    # but the approver check reads the new manager). So we withdraw pending requests
+    # and DM the employee to re-file. Approved leave is unaffected and rides through.
+    upsert_employee(db, "U_E", "Eve", "U_OLDMGR")
+    pend = create_request(db, "U_E", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, pend, "C_OLD", "777.7")
+    appr = create_request(db, "U_E", "vacation", date(2026, 8, 1), date(2026, 8, 2), None)
+    approve_request(db, appr)
+    set_calendar_event_id(db, appr, "evt-keep")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name="Eve", manager="U_NEWMGR"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_E")["manager_id"] == "U_NEWMGR"  # change applied
+    assert get_request(db, pend)["status"] == "cancelled"  # pending withdrawn
+    assert get_request(db, appr)["status"] == "approved"  # approved rides through
+    assert cal.deleted == []  # approved calendar event untouched
+    assert any(
+        c["channel"] == "C_OLD" and c["ts"] == "777.7" for c in client.chat_update_calls
+    )  # old manager's ticket withdrawn
+    assert any(
+        c["channel"] == "U_E" and "re-file" in c["text"] for c in client.chat_postMessage_calls
+    )  # employee told to re-file
+
+
+def test_manage_edit_name_only_leaves_pending(db):
+    # A name-only edit (manager unchanged) must NOT disturb pending leave.
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    pend = create_request(db, "U_E", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, pend, "C", "1.1")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name="Eve Renamed", manager="U_MGR"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_E")["real_name"] == "Eve Renamed"
+    assert get_request(db, pend)["status"] == "pending"  # untouched
+    assert client.chat_update_calls == []  # no ticket withdrawn
+
+
 def test_manage_edit_preserves_carry_in(db):
     upsert_employee(db, "U_E", "Eve", None)
     # Materialise a carry chain so the row carries stored carry_in (2027 -> 5).
@@ -1084,6 +1522,55 @@ def test_manage_delete_manager_blocked_naming_reports(db):
     assert get_employee(db, "U_R")["manager_id"] == "U_M"
 
 
+def test_manage_delete_settles_pending_leave(db):
+    # Deleting an employee with a pending request cancels it and withdraws the
+    # manager's still-open ticket, so no dangling Approve/Decline buttons remain.
+    upsert_employee(db, "U_M", "Manager", "U_M")
+    upsert_employee(db, "U_R", "Reportee", "U_M")
+    rid = create_request(db, "U_R", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, rid, "C_MGR", "555.5")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_R", action="delete"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_R") is None  # removed
+    assert get_request(db, rid)["status"] == "cancelled"  # pending leave settled
+    assert any(
+        c["channel"] == "C_MGR" and c["ts"] == "555.5" for c in client.chat_update_calls
+    )  # ticket withdrawn
+
+
+def test_manage_delete_settles_future_approved_leave(db):
+    # An approved upcoming leave has its calendar event and board entry removed.
+    upsert_employee(db, "U_A", "Alice", "U_A")
+    rid = create_request(db, "U_A", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    approve_request(db, rid)
+    set_calendar_event_id(db, rid, "evt-future")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_A", action="delete"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_A") is None
+    assert get_request(db, rid)["status"] == "cancelled"
+    assert cal.deleted == ["evt-future"]  # calendar event removed
+
+
 def test_manage_delete_after_reassigning_reports_succeeds(db):
     upsert_employee(db, "U_M", "Manager", None)
     upsert_employee(db, "U_R", "Reportee", "U_M")
@@ -1109,11 +1596,12 @@ def test_manage_delete_after_reassigning_reports_succeeds(db):
     assert get_employee(db, "U_M") is None
 
 
-def _holidays_view(holiday_date=None, label=None, remove=None):
+def _holidays_view(action="add", holiday_date=None, label=None, remove=None):
     """A view_submission state payload matching build_holidays_modal."""
     return {
         "state": {
             "values": {
+                "holiday_action": {HOLIDAYS_ACTION_SELECT: {"selected_option": {"value": action}}},
                 "holiday_date": {"value": {"selected_date": holiday_date}},
                 "holiday_label": {"value": {"value": label}},
                 "holiday_remove": {
@@ -1124,7 +1612,7 @@ def _holidays_view(holiday_date=None, label=None, remove=None):
     }
 
 
-def test_holidays_modal_opens_for_admin(db):
+def test_holidays_modal_defaults_to_add_mode(db):
     upsert_holiday(db, date(2026, 4, 13), "Songkran")
     client = FakeSlackClient()
     open_holidays(
@@ -1137,7 +1625,42 @@ def test_holidays_modal_opens_for_admin(db):
     view = client.views_push_calls[0]["view"]
     assert view["callback_id"] == HOLIDAYS_CALLBACK_ID
     ids = {b.get("block_id") for b in view["blocks"]}
-    assert {"holiday_date", "holiday_label", "holiday_remove"} <= ids  # remove shown (one exists)
+    assert {"holiday_action", "holiday_date", "holiday_label"} <= ids
+    assert "holiday_remove" not in ids  # the remove picker only shows in remove mode
+
+
+def test_holidays_switch_to_remove_lists_existing(db):
+    upsert_holiday(db, date(2026, 4, 13), "Songkran")
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "remove"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_update_calls[0]["view"]
+    ids = {b.get("block_id") for b in view["blocks"]}
+    assert "holiday_remove" in ids
+    assert "holiday_date" not in ids  # add fields hidden in remove mode
+    block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_remove")
+    assert [o["value"] for o in block["element"]["options"]] == ["2026-04-13"]
+
+
+def test_holidays_remove_mode_with_none_shows_note(db):
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "remove"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_update_calls[0]["view"]
+    assert "holiday_remove" not in {b.get("block_id") for b in view["blocks"]}
+    assert any("No holidays to remove" in str(b) for b in view["blocks"])
 
 
 def test_holidays_add_creates_event_and_stores(db):
@@ -1146,7 +1669,7 @@ def test_holidays_add_creates_event_and_stores(db):
     submit_holidays(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        view=_holidays_view(holiday_date="2026-04-13", label="Songkran"),
+        view=_holidays_view(action="add", holiday_date="2026-04-13", label="Songkran"),
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
@@ -1164,7 +1687,7 @@ def test_holidays_remove_deletes_event_and_entry(db):
     submit_holidays(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
-        view=_holidays_view(remove="2026-04-13"),
+        view=_holidays_view(action="remove", remove="2026-04-13"),
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
@@ -1180,7 +1703,7 @@ def test_holidays_add_requires_date_and_label(db):
     submit_holidays(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        view=_holidays_view(holiday_date="2026-04-13"),  # label missing
+        view=_holidays_view(action="add", holiday_date="2026-04-13"),  # label missing
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
@@ -1192,12 +1715,28 @@ def test_holidays_add_requires_date_and_label(db):
     assert cal.created == []
 
 
+def test_holidays_remove_without_selection_errors(db):
+    cal = FakeCalendar()
+    ack = FakeAck()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(action="remove"),  # nothing picked
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "holiday_remove" in ack.response["errors"]
+
+
 def test_holidays_non_admin_submit_rejected(db):
     cal = FakeCalendar()
     submit_holidays(
         ack=FakeAck(),
         body={"user": {"id": "U_OTHER"}},
-        view=_holidays_view(holiday_date="2026-04-13", label="Songkran"),
+        view=_holidays_view(action="add", holiday_date="2026-04-13", label="Songkran"),
         db=db,
         calendar=cal,
         client=FakeSlackClient(),

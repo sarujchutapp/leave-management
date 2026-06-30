@@ -24,9 +24,12 @@ from leave.blocks import (
     GROUP_PICK_ACTION,
     CARRY_OVER_ACTION,
     CARRY_OVER_CALLBACK_ID,
+    CARRY_OVER_TOGGLE_ACTION,
+    CONSECUTIVE_TOGGLE_ACTION,
     CLEAR_ACTION,
     CLEAR_CALLBACK_ID,
     HOLIDAYS_ACTION,
+    HOLIDAYS_ACTION_SELECT,
     HOLIDAYS_CALLBACK_ID,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
@@ -57,13 +60,17 @@ from leave.handlers import (
     open_cancel_modal,
     open_group_picker,
     open_holidays,
+    update_holidays_modal,
     open_carry_over,
     open_clear,
     open_control_menu,
     open_leave_limits,
     open_leave_modal,
     open_manage_employees,
+    prefill_manage_employee,
     update_manage_modal,
+    update_carry_over_modal,
+    update_leave_limits_modal,
     open_report,
     open_view_settings,
     update_report_modal,
@@ -84,7 +91,11 @@ from leave.handlers import (
     submit_leave_ack,
     submit_leave_apply,
     submit_leave_limits,
+    submit_leave_limits_ack,
+    submit_leave_limits_apply,
     submit_manage_employees,
+    submit_manage_employees_ack,
+    submit_manage_employees_apply,
     submit_report,
     submit_report_ack,
     submit_report_apply,
@@ -193,17 +204,22 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             open_leave_limits(ack, body, client, d, admin_ids)
 
-    # Leave-limits submit is validate + a single PutItem (fast, well under 3s), so
-    # it runs synchronously in both run modes rather than as a lazy listener.
-    @app.view(LEAVE_LIMITS_CALLBACK_ID)
-    def _leave_limits_submit(ack, body, view, client):
+    # Enforce-consecutive-limit checkbox: re-render the modal in place (fast).
+    @app.action(CONSECUTIVE_TOGGLE_ACTION)
+    def _consecutive_toggle(ack, body, client):
         with db.connect() as d:
-            submit_leave_limits(ack, body, view, client, d, admin_ids)
+            update_leave_limits_modal(ack, body, client, d, admin_ids)
 
     @app.action(CARRY_OVER_ACTION)
     def _carry_over(ack, body, client):
         with db.connect() as d:
             open_carry_over(ack, body, client, d, admin_ids)
+
+    # Enable-carry-over checkbox: re-render the modal in place (fast).
+    @app.action(CARRY_OVER_TOGGLE_ACTION)
+    def _carry_over_toggle(ack, body, client):
+        with db.connect() as d:
+            update_carry_over_modal(ack, body, client, d, admin_ids)
 
     @app.action(CLEAR_ACTION)
     def _clear(ack, body, client):
@@ -218,9 +234,22 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             open_holidays(ack, body, client, d, admin_ids)
 
+    # Holidays Add/Remove select: re-render the modal in place (fast).
+    @app.action(HOLIDAYS_ACTION_SELECT)
+    def _holidays_action_changed(ack, body, client):
+        with db.connect() as d:
+            update_holidays_modal(ack, body, client, d, admin_ids)
+
     @app.action(MANAGE_ACTION_SELECT)
     def _manage_action_changed(ack, body, client):
         update_manage_modal(ack, body, client, admin_ids)
+
+    # Employee picked in Manage Employees: re-render with their current values
+    # prefilled (constrained to that block so it doesn't catch other "value" pickers).
+    @app.action({"action_id": "value", "block_id": "employee"})
+    def _manage_employee_picked(ack, body, client):
+        with db.connect() as d:
+            prefill_manage_employee(ack, body, client, d, admin_ids)
 
     @app.action(REPORT_ACTION)
     def _report(ack, body, client):
@@ -231,13 +260,6 @@ def build_app(calendar=None, faas=False):
     def _report_type_changed(ack, body, client):
         with db.connect() as d:
             update_report_modal(ack, body, client, d, admin_ids)
-
-    # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
-    # fast, so it runs synchronously in both run modes.
-    @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
-    def _manage_employees_submit(ack, body, view, client):
-        with db.connect() as d:
-            submit_manage_employees(ack, body, view, client, d, admin_ids)
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):
@@ -322,6 +344,35 @@ def build_app(calendar=None, faas=False):
 
         app.view(HOLIDAYS_CALLBACK_ID)(ack=_holidays_ack, lazy=[_holidays_lazy])
 
+        # Manage-employees submit: validate + close the modal in the ack phase, then do
+        # the write post-ack. Delete and a manager change settle the person's in-flight
+        # leave (calendar/board/ticket cleanup — slow Slack/calendar calls), so the work
+        # must run lazily to keep the ack under 3s.
+        def _manage_ack(ack, body, view, client):
+            with db.connect() as d:
+                submit_manage_employees_ack(ack, body, view, client, d, admin_ids)
+
+        def _manage_lazy(body, view, client):
+            with db.connect() as d:
+                submit_manage_employees_apply(
+                    body, view, client, d, admin_ids, get_calendar(), get_sheets()
+                )
+
+        app.view(MANAGE_EMPLOYEES_CALLBACK_ID)(ack=_manage_ack, lazy=[_manage_lazy])
+
+        # Leave-limits submit: validate + close in the ack phase, then write the policy
+        # post-ack. A vacation-allowance change rebuilds every employee's carry_in (a
+        # Scan), so the write runs lazily to keep the ack under 3s.
+        def _leave_limits_ack(ack, body, view):
+            with db.connect() as d:
+                submit_leave_limits_ack(ack, body, view, d, admin_ids)
+
+        def _leave_limits_lazy(body, view, client):
+            with db.connect() as d:
+                submit_leave_limits_apply(body, view, d, client, admin_ids)
+
+        app.view(LEAVE_LIMITS_CALLBACK_ID)(ack=_leave_limits_ack, lazy=[_leave_limits_lazy])
+
         # Group-break submit: the ack rejects a bot pick (inline error) or closes the
         # picker, then the multi-person search + DM run post-ack so the ack stays
         # under 3s for larger groups. The lazy apply re-checks bots (it fires
@@ -397,6 +448,18 @@ def build_app(calendar=None, faas=False):
         def _holidays_submit(ack, body, view, client):
             with db.connect() as d:
                 submit_holidays(ack, body, view, d, get_calendar(), client, admin_ids)
+
+        @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
+        def _manage_employees_submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_manage_employees(
+                    ack, body, view, client, d, admin_ids, get_calendar(), get_sheets()
+                )
+
+        @app.view(LEAVE_LIMITS_CALLBACK_ID)
+        def _leave_limits_submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_leave_limits(ack, body, view, client, d, admin_ids)
 
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):

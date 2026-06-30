@@ -51,6 +51,10 @@ REPORT_ACTION = "control_report"
 MANAGE_EMPLOYEES_ACTION = "control_manage_employees"
 HOLIDAYS_CALLBACK_ID = "control_holidays_submit"
 HOLIDAYS_ACTION = "control_holidays"
+HOLIDAYS_ACTION_SELECT = "holiday_action_select"
+# Checkboxes that toggle whether a cap is enforced; toggling re-renders the modal.
+CONSECUTIVE_TOGGLE_ACTION = "control_enforce_consecutive"
+CARRY_OVER_TOGGLE_ACTION = "control_enable_carry_over"
 
 
 def format_period(start, end, half=None):
@@ -587,55 +591,76 @@ _CONTROL_BUTTONS = [
 ]
 
 
-def build_holidays_modal(holidays):
-    """Admin holidays modal: add a holiday (date + label), or remove an existing
-    one. All inputs are optional; the submit applies a remove if one is picked,
-    otherwise an add. `holidays` is a list of (date, label, event_id) for the
-    remove dropdown (omitted when there are none yet)."""
+_HOLIDAY_ACTIONS = [
+    {"text": {"type": "plain_text", "text": "Add a holiday"}, "value": "add"},
+    {"text": {"type": "plain_text", "text": "Remove a holiday"}, "value": "remove"},
+]
+
+
+def build_holidays_modal(holidays, action="add"):
+    """Admin holidays modal. An Action select chooses Add or Remove and dispatches a
+    block action that re-renders this modal, so exactly one action is in play and its
+    fields are required (no ambiguous all-optional submit). Add shows a date + label;
+    Remove shows a dropdown of the current holidays (or a note when there are none).
+    `holidays` is a list of (date, label, event_id)."""
+    initial = next((o for o in _HOLIDAY_ACTIONS if o["value"] == action), _HOLIDAY_ACTIONS[0])
     blocks = [
         {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Add* a holiday (date + label), or *remove* one below.",
+            "type": "input",
+            "block_id": "holiday_action",
+            "dispatch_action": True,  # re-render the modal when the action changes
+            "label": {"type": "plain_text", "text": "Action"},
+            "element": {
+                "type": "static_select",
+                "action_id": HOLIDAYS_ACTION_SELECT,
+                "initial_option": initial,
+                "options": _HOLIDAY_ACTIONS,
             },
         },
-        {
-            "type": "input",
-            "block_id": "holiday_date",
-            "optional": True,
-            "label": {"type": "plain_text", "text": "Date"},
-            "element": {"type": "datepicker", "action_id": "value"},
-        },
-        {
-            "type": "input",
-            "block_id": "holiday_label",
-            "optional": True,
-            "label": {"type": "plain_text", "text": "Label"},
-            "element": {"type": "plain_text_input", "action_id": "value"},
-        },
     ]
-    if holidays:
-        blocks.append(
+    if action == "remove":
+        if holidays:
+            blocks.append(
+                {
+                    "type": "input",
+                    "block_id": "holiday_remove",
+                    "label": {"type": "plain_text", "text": "Holiday to remove"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "value",
+                        "placeholder": {"type": "plain_text", "text": "Pick one to remove"},
+                        "options": [
+                            {
+                                "text": {"type": "plain_text", "text": f"{d.isoformat()} — {label}"[:75]},
+                                "value": d.isoformat(),
+                            }
+                            for d, label, _ in holidays
+                        ],
+                    },
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "No holidays to remove yet."}],
+                }
+            )
+    else:  # add
+        blocks += [
             {
                 "type": "input",
-                "block_id": "holiday_remove",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Remove a holiday"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick one to remove"},
-                    "options": [
-                        {
-                            "text": {"type": "plain_text", "text": f"{d.isoformat()} — {label}"[:75]},
-                            "value": d.isoformat(),
-                        }
-                        for d, label, _ in holidays
-                    ],
-                },
-            }
-        )
+                "block_id": "holiday_date",
+                "label": {"type": "plain_text", "text": "Date"},
+                "element": {"type": "datepicker", "action_id": "value"},
+            },
+            {
+                "type": "input",
+                "block_id": "holiday_label",
+                "label": {"type": "plain_text", "text": "Label"},
+                "element": {"type": "plain_text_input", "action_id": "value"},
+            },
+        ]
     return {
         "type": "modal",
         "callback_id": HOLIDAYS_CALLBACK_ID,
@@ -646,32 +671,39 @@ def build_holidays_modal(holidays):
     }
 
 
+# Slack shows the first 5 buttons in an actions block and collapses the rest into a
+# "…" overflow, so the buttons are spread across actions blocks of at most this many.
+_MENU_ROW = 4
+
+
 def build_control_menu():
-    """The /control admin menu: a button per admin action. No submit — each button
-    is a block action that opens its own sub-modal."""
-    return {
-        "type": "modal",
-        "callback_id": CONTROL_MENU_CALLBACK_ID,
-        "title": {"type": "plain_text", "text": "Admin Control"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "Pick an admin action:"},
-            },
+    """The /control admin menu: a button per admin action. No submit — each button is a
+    block action that opens its own sub-modal. Buttons are chunked across actions blocks
+    so none are hidden behind Slack's overflow (see _MENU_ROW)."""
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Pick an admin action:"}},
+    ]
+    for i in range(0, len(_CONTROL_BUTTONS), _MENU_ROW):
+        blocks.append(
             {
                 "type": "actions",
-                "block_id": "control_actions",
+                "block_id": f"control_actions_{i // _MENU_ROW}",
                 "elements": [
                     {
                         "type": "button",
                         "action_id": action_id,
                         "text": {"type": "plain_text", "text": label},
                     }
-                    for action_id, label in _CONTROL_BUTTONS
+                    for action_id, label in _CONTROL_BUTTONS[i : i + _MENU_ROW]
                 ],
-            },
-        ],
+            }
+        )
+    return {
+        "type": "modal",
+        "callback_id": CONTROL_MENU_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Admin Control"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
     }
 
 
@@ -691,49 +723,107 @@ def _number_input(block_id, label, value):
     }
 
 
+def _toggle_checkbox(block_id, action_id, label, checked):
+    """A single-option checkbox that re-renders the modal when toggled."""
+    option = {"text": {"type": "plain_text", "text": label}, "value": "on"}
+    element = {"type": "checkboxes", "action_id": action_id, "options": [option]}
+    if checked:
+        element["initial_options"] = [option]
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "dispatch_action": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": element,
+    }
+
+
 def build_leave_limits_modal(policy):
-    """Edit base allowance per type + the vacation consecutive limit, pre-filled
-    from the current central policy."""
+    """Edit base allowance per type + the vacation consecutive limit, pre-filled from
+    the current central policy. The consecutive limit can be turned off (checkbox); when
+    off, its number field is hidden (rendered from the stored state at open, re-rendered
+    on toggle)."""
     allowances = policy["allowances"]
+    consecutive = policy["consecutive_limit"]["vacation"]
+    enforce = consecutive is not None
+    blocks = [
+        _number_input("sick", "Sick allowance (days)", allowances["sick"]),
+        _number_input("vacation", "Vacation allowance (days)", allowances["vacation"]),
+        _number_input("personal", "Personal allowance (days)", allowances["personal"]),
+        _toggle_checkbox(
+            "enforce_consecutive",
+            CONSECUTIVE_TOGGLE_ACTION,
+            "Enforce a consecutive limit on vacation",
+            enforce,
+        ),
+    ]
+    if enforce:
+        blocks.append(
+            _number_input("consecutive_limit", "Vacation consecutive limit (days)", consecutive)
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Lowering the vacation allowance takes effect immediately and can push "
+                    "balances negative for anyone who has already used more than the new amount "
+                    "(this blocks their new bookings until the year resets).",
+                }
+            ],
+        }
+    )
     return {
         "type": "modal",
         "callback_id": LEAVE_LIMITS_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Leave Limits"},
         "submit": {"type": "plain_text", "text": "Save"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            _number_input("sick", "Sick allowance (days)", allowances["sick"]),
-            _number_input("vacation", "Vacation allowance (days)", allowances["vacation"]),
-            _number_input("personal", "Personal allowance (days)", allowances["personal"]),
-            _number_input(
-                "consecutive_limit",
-                "Vacation consecutive limit (days)",
-                policy["consecutive_limit"]["vacation"],
-            ),
-        ],
+        "blocks": blocks,
     }
 
 
 def build_carry_over_modal(policy):
-    """Edit the vacation carry-over caps, pre-filled from the current central policy."""
+    """Edit the vacation carry-over caps, pre-filled from the current central policy.
+    Carry-over can be turned off (checkbox); when off (max carry over 0) its field is
+    hidden. Max total is always shown. Rendered from the stored state at open,
+    re-rendered on toggle."""
+    max_carry_over = policy["max_carry_over"]["vacation"]
+    enabled = max_carry_over > 0
+    blocks = [
+        _toggle_checkbox(
+            "enable_carry_over", CARRY_OVER_TOGGLE_ACTION, "Enable carry-over", enabled
+        ),
+    ]
+    if enabled:
+        blocks.append(
+            _number_input("max_carry_over", "Max carry over (vacation days)", max_carry_over)
+        )
+    blocks.append(
+        _number_input("max_total", "Max total (vacation days)", policy["max_total"]["vacation"])
+    )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Lowering a cap recomputes everyone's carry-in immediately — "
+                    "balances can drop, and go negative until the year resets (which blocks "
+                    "new bookings). Raising it back restores them.",
+                }
+            ],
+        }
+    )
     return {
         "type": "modal",
         "callback_id": CARRY_OVER_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Carry-over"},
         "submit": {"type": "plain_text", "text": "Save"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            _number_input(
-                "max_carry_over",
-                "Max carry over (vacation days)",
-                policy["max_carry_over"]["vacation"],
-            ),
-            _number_input(
-                "max_total",
-                "Max total (vacation days)",
-                policy["max_total"]["vacation"],
-            ),
-        ],
+        "blocks": blocks,
     }
 
 
@@ -751,13 +841,16 @@ def _optional_user_select(block_id, label, placeholder):
     }
 
 
-def _optional_text(block_id, label):
+def _optional_text(block_id, label, initial=None):
+    element = {"type": "plain_text_input", "action_id": "value"}
+    if initial is not None:
+        element["initial_value"] = str(initial)
     return {
         "type": "input",
         "block_id": block_id,
         "optional": True,
         "label": {"type": "plain_text", "text": label},
-        "element": {"type": "plain_text_input", "action_id": "value"},
+        "element": element,
     }
 
 
@@ -768,23 +861,30 @@ _MANAGE_ACTIONS = [
 ]
 
 
-def build_manage_employees_modal(action="save"):
+def build_manage_employees_modal(action="save", selected_user=None, employee=None):
     """Add/edit, set an allowance override, or delete an employee. The Action select
-    dispatches a block action so the modal shows only the fields the chosen action
-    needs (re-rendered via views_update). Employee + Manager are Slack user-pickers,
-    so member IDs are supplied directly. Delete is block-and-tell: a person who still
-    manages anyone is rejected until reassigned."""
+    and the Employee picker both dispatch a block action so the modal re-renders —
+    the Action select shows only the fields that action needs, and picking an Employee
+    prefills their current name/manager/override (blank for someone not yet in the
+    system). Employee + Manager are Slack user-pickers, so member IDs are supplied
+    directly. Delete is block-and-tell: a person who still manages anyone is rejected
+    until reassigned. `employee` is the picked person's stored record (or None)."""
     initial = next((o for o in _MANAGE_ACTIONS if o["value"] == action), _MANAGE_ACTIONS[0])
+    overrides = (employee or {}).get("allowances") or {}
+    employee_element = {
+        "type": "users_select",
+        "action_id": "value",
+        "placeholder": {"type": "plain_text", "text": "Pick a person"},
+    }
+    if selected_user:
+        employee_element["initial_user"] = selected_user
     blocks = [
         {
             "type": "input",
             "block_id": "employee",
+            "dispatch_action": True,  # re-render with the picked person's values prefilled
             "label": {"type": "plain_text", "text": "Employee"},
-            "element": {
-                "type": "users_select",
-                "action_id": "value",
-                "placeholder": {"type": "plain_text", "text": "Pick a person"},
-            },
+            "element": employee_element,
         },
         {
             "type": "input",
@@ -801,12 +901,22 @@ def build_manage_employees_modal(action="save"):
     ]
 
     if action == "save":
+        name_element = {"type": "plain_text_input", "action_id": "value"}
+        if employee and employee.get("real_name"):
+            name_element["initial_value"] = employee["real_name"]
+        manager_element = {
+            "type": "users_select",
+            "action_id": "value",
+            "placeholder": {"type": "plain_text", "text": "Pick the approver"},
+        }
+        if employee and employee.get("manager_id"):
+            manager_element["initial_user"] = employee["manager_id"]
         blocks += [
             {
                 "type": "input",
                 "block_id": "name",
                 "label": {"type": "plain_text", "text": "Name"},
-                "element": {"type": "plain_text_input", "action_id": "value"},
+                "element": name_element,
             },
             {
                 "type": "input",
@@ -817,11 +927,7 @@ def build_manage_employees_modal(action="save"):
                     "text": "The approver. Pick the person themselves if they're top of chain "
                     "(their leave auto-approves).",
                 },
-                "element": {
-                    "type": "users_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick the approver"},
-                },
+                "element": manager_element,
             },
         ]
     elif action == "override":
@@ -838,9 +944,9 @@ def build_manage_employees_modal(action="save"):
             }
         )
         blocks += [
-            _optional_text("override_sick", "Sick override"),
-            _optional_text("override_vacation", "Vacation override"),
-            _optional_text("override_personal", "Personal override"),
+            _optional_text("override_sick", "Sick override", overrides.get("sick")),
+            _optional_text("override_vacation", "Vacation override", overrides.get("vacation")),
+            _optional_text("override_personal", "Personal override", overrides.get("personal")),
         ]
     else:  # delete
         blocks.append(
@@ -973,11 +1079,15 @@ def build_settings_view(policy):
     allowances = "   ·   ".join(
         f"*{t}*: {policy['allowances'][t]}" for t in LEAVE_TYPES
     )
+    max_carry_over = policy["max_carry_over"]["vacation"]
+    carry_over = "disabled" if max_carry_over == 0 else max_carry_over
+    consecutive = policy["consecutive_limit"]["vacation"]
+    consecutive_text = "No limit" if consecutive is None else consecutive
     lines = [
         f"*Allowances* — {allowances}",
-        f"*Max carry over* (vacation): {policy['max_carry_over']['vacation']}",
+        f"*Max carry over* (vacation): {carry_over}",
         f"*Max total* (vacation): {policy['max_total']['vacation']}",
-        f"*Consecutive limit* (vacation): {policy['consecutive_limit']['vacation']}",
+        f"*Consecutive limit* (vacation): {consecutive_text}",
     ]
     return {
         "type": "modal",

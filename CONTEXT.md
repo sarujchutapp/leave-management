@@ -43,6 +43,13 @@ per-employee relationship for approving leave — being an admin grants no appro
 and vice versa.
 _Avoid_: owner, superuser, top of chain
 
+**Top of chain**:
+An employee with no approver above them — they are listed as their own manager, or
+have none — so their own leave auto-approves rather than routing a ticket to anyone.
+Typically still a manager of others. Distinct from an **Admin**, which is a
+configuration role that carries no approval meaning.
+_Avoid_: self-approver, self-managed, root
+
 **Leave policy**:
 The company-wide configuration that governs balances, kept in one central place (not
 copied onto each employee): per leave type, the **base allowance**, **max carry over**,
@@ -66,7 +73,8 @@ The cap on the length of a continuous absence, currently **15 calendar days, vac
 only**. Enforced only when a vacation request is filed (a new request may not create a
 continuous absence longer than the cap); sick/personal stretches are not themselves
 capped but do count toward the run. A hard validation block, like the balance and overlap
-checks.
+checks. An admin may turn the cap off entirely, in which case continuous absence is
+unbounded.
 _Avoid_: max leave, consecutive days off
 
 **Leave board**:
@@ -113,7 +121,8 @@ working stretch). Explainable by design — every flag says why, never an opaque
 _Avoid_: burnout score, wellness index
 
 **Max carry over**:
-The cap on how many unused days may roll *out* of a year into the next.
+The cap on how many unused days may roll *out* of a year into the next. A cap of zero
+disables carry-over entirely — unused days are simply lost at year end.
 
 **Max total**:
 The cap on how much vacation is *available within a year*: `min(allowance + carry_in,
