@@ -51,6 +51,7 @@ from leave.requests import (
     remaining_balance,
     remaining_balances,
     set_calendar_event_id,
+    set_ticket_ref,
 )
 from leave.seed import upsert_employee
 from tests.fakes import FakeAck, FakeCalendar, FakeSheets, FakeSlackClient
@@ -525,6 +526,29 @@ def test_clear_correct_word_wipes_and_preserves_the_rest(db):
     assert get_employee(db, "U_A") is not None
     assert get_policy(db)["allowances"]["vacation"] == 10
     assert date(2026, 1, 1) in holidays_for_year(db, 2026)
+
+
+def test_clear_wipes_carry_in(db):
+    # Clear is a true clean slate (ADR-0009): stored carry-in is wiped too, so
+    # everyone resets to base allowance.
+    set_policy(db)
+    _seed_carry_2027(db, "U_A")
+    assert "carry_in" in get_employee(db, "U_A")
+    clear_all_requests(db, FakeCalendar(), FakeSheets(), TODAY)
+    assert "carry_in" not in get_employee(db, "U_A")
+
+
+def test_clear_withdraws_pending_tickets(db):
+    # Clear deletes pending rows; it also switches off the manager's still-open
+    # ticket so no orphan Approve/Decline buttons remain.
+    upsert_employee(db, "U_A", "A", "U_M")
+    rid = create_request(db, "U_A", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, rid, "C_MGR", "999.9")
+    client = FakeSlackClient()
+    clear_all_requests(db, FakeCalendar(), FakeSheets(), TODAY, client=client)
+    assert any(
+        c["channel"] == "C_MGR" and c["ts"] == "999.9" for c in client.chat_update_calls
+    )
 
 
 def test_clear_non_admin_is_rejected(db):
@@ -1029,6 +1053,62 @@ def test_manage_edit_updates_name_and_manager(db):
     assert emp["manager_id"] == "U_NEW_MGR"
 
 
+def test_manage_edit_manager_change_settles_pending_only(db):
+    # Changing the manager strands a pending ticket (it sits in the OLD manager's DM,
+    # but the approver check reads the new manager). So we withdraw pending requests
+    # and DM the employee to re-file. Approved leave is unaffected and rides through.
+    upsert_employee(db, "U_E", "Eve", "U_OLDMGR")
+    pend = create_request(db, "U_E", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, pend, "C_OLD", "777.7")
+    appr = create_request(db, "U_E", "vacation", date(2026, 8, 1), date(2026, 8, 2), None)
+    approve_request(db, appr)
+    set_calendar_event_id(db, appr, "evt-keep")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name="Eve", manager="U_NEWMGR"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_E")["manager_id"] == "U_NEWMGR"  # change applied
+    assert get_request(db, pend)["status"] == "cancelled"  # pending withdrawn
+    assert get_request(db, appr)["status"] == "approved"  # approved rides through
+    assert cal.deleted == []  # approved calendar event untouched
+    assert any(
+        c["channel"] == "C_OLD" and c["ts"] == "777.7" for c in client.chat_update_calls
+    )  # old manager's ticket withdrawn
+    assert any(
+        c["channel"] == "U_E" and "re-file" in c["text"] for c in client.chat_postMessage_calls
+    )  # employee told to re-file
+
+
+def test_manage_edit_name_only_leaves_pending(db):
+    # A name-only edit (manager unchanged) must NOT disturb pending leave.
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    pend = create_request(db, "U_E", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, pend, "C", "1.1")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name="Eve Renamed", manager="U_MGR"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_E")["real_name"] == "Eve Renamed"
+    assert get_request(db, pend)["status"] == "pending"  # untouched
+    assert client.chat_update_calls == []  # no ticket withdrawn
+
+
 def test_manage_edit_preserves_carry_in(db):
     upsert_employee(db, "U_E", "Eve", None)
     # Materialise a carry chain so the row carries stored carry_in (2027 -> 5).
@@ -1082,6 +1162,55 @@ def test_manage_delete_manager_blocked_naming_reports(db):
     # Nothing deleted, no one re-parented.
     assert get_employee(db, "U_M") is not None
     assert get_employee(db, "U_R")["manager_id"] == "U_M"
+
+
+def test_manage_delete_settles_pending_leave(db):
+    # Deleting an employee with a pending request cancels it and withdraws the
+    # manager's still-open ticket, so no dangling Approve/Decline buttons remain.
+    upsert_employee(db, "U_M", "Manager", "U_M")
+    upsert_employee(db, "U_R", "Reportee", "U_M")
+    rid = create_request(db, "U_R", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    set_ticket_ref(db, rid, "C_MGR", "555.5")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_R", action="delete"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_R") is None  # removed
+    assert get_request(db, rid)["status"] == "cancelled"  # pending leave settled
+    assert any(
+        c["channel"] == "C_MGR" and c["ts"] == "555.5" for c in client.chat_update_calls
+    )  # ticket withdrawn
+
+
+def test_manage_delete_settles_future_approved_leave(db):
+    # An approved upcoming leave has its calendar event and board entry removed.
+    upsert_employee(db, "U_A", "Alice", "U_A")
+    rid = create_request(db, "U_A", "vacation", date(2026, 7, 1), date(2026, 7, 2), None)
+    approve_request(db, rid)
+    set_calendar_event_id(db, rid, "evt-future")
+    cal, sheets, client = FakeCalendar(), FakeSheets(), FakeSlackClient()
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_A", action="delete"),
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        calendar=cal,
+        sheets=sheets,
+        today=TODAY,
+    )
+    assert get_employee(db, "U_A") is None
+    assert get_request(db, rid)["status"] == "cancelled"
+    assert cal.deleted == ["evt-future"]  # calendar event removed
 
 
 def test_manage_delete_after_reassigning_reports_succeeds(db):

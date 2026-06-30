@@ -283,7 +283,7 @@ def submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, toda
     today = today or date.today()
     if not is_admin(body["user"]["id"], admin_ids) or not _clear_confirmed(view):
         return
-    count = clear_all_requests(db, calendar, sheets, today)
+    count = clear_all_requests(db, calendar, sheets, today, client=client)
     _notify(
         client,
         body["user"]["id"],
@@ -520,46 +520,62 @@ def _is_bot(client, user_id):
     return bool(info.get("is_bot") or info.get("is_app_user")) or user_id == "USLACKBOT"
 
 
-def submit_manage_employees(ack, body, view, client, db, admin_ids):
-    """Add/edit, set an allowance override, or delete an employee, per the chosen
-    Action. Delete is block-and-tell: if the target still manages anyone, the submit
-    is rejected naming those reports — nothing deleted, no automatic re-parenting."""
-    if not is_admin(body["user"]["id"], admin_ids):
-        ack()
-        return
-    values = view["state"]["values"]
-    target = _value(values, "employee").get("selected_user")
-    action = _manage_action(values)
+EMPLOYEE_REMOVED_WITHDRAW = (
+    "This request was withdrawn — the employee was removed from the leave system."
+)
+MANAGER_CHANGED_WITHDRAW = (
+    "This request was withdrawn — the employee's manager changed; they'll re-file."
+)
 
+
+def _withdraw_ticket(client, request, text):
+    """Replace a pending request's manager ticket so its Approve/Decline buttons vanish."""
+    if request.get("ticket_ts"):
+        client.chat_update(
+            channel=request["ticket_channel"],
+            ts=request["ticket_ts"],
+            text="Request withdrawn",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+        )
+
+
+def _settle_in_flight_leave(
+    db, client, calendar, sheets, employee_id, withdraw_text, today, include_approved
+):
+    """Cancel this employee's still-open requests, cleaning up each artifact so nothing
+    dangles: a pending request's manager ticket is withdrawn. When `include_approved`
+    (a full removal), a future-approved request is also cancelled and its calendar event
+    and board entry removed; otherwise (a manager change) approved leave is left intact,
+    since it needs no further manager action. Past (taken) leave is always kept as
+    history. Returns the number of pending requests withdrawn."""
+    pending = 0
+    for request in cancellable_requests(db, employee_id, today):
+        if request["status"] == "pending":
+            cancel_request(db, request["request_id"])
+            pending += 1
+            _withdraw_ticket(client, request, withdraw_text)
+        elif include_approved:  # future-approved: drop its calendar event and board entry
+            cancel_request(db, request["request_id"])
+            if request["calendar_event_id"]:
+                calendar.delete_event(request["calendar_event_id"])
+            update_board(db, client, today, sheets, remove_request_id=request["request_id"])
+    return pending
+
+
+def _manage_errors(values, client, db, target, action):
+    """Inline-error validation shared by the ack and apply phases (empty dict = valid).
+    Delete is block-and-tell (a person still managing anyone is rejected naming those
+    reports); save requires a unique name + a manager, neither an app/bot."""
     if action == "delete":
         reports = [r for r in list_reports(db, target) if r["slack_user_id"] != target]
         if reports:
             names = ", ".join(sorted(r.get("real_name", r["slack_user_id"]) for r in reports))
-            ack(
-                response_action="errors",
-                errors={
-                    "employee": f"Still the manager of {names}. Re-assign them first, then delete."
-                },
-            )
-            return
-        ack(response_action="clear")  # close the whole modal stack on success
-        delete_employee(db, target)
-        _notify(client, body["user"]["id"], f"🗑️ Removed <@{target}> from the leave system.")
-        return
-
+            return {"employee": f"Still the manager of {names}. Re-assign them first, then delete."}
+        return {}
     if action == "override":
-        overrides, errors = _parse_overrides(values)
-        if errors:
-            ack(response_action="errors", errors=errors)
-            return
-        ack(response_action="clear")
-        set_allowance_override(db, target, overrides)
-        what = "set" if overrides else "cleared"
-        _notify(client, body["user"]["id"], f"✅ Allowance override {what} for <@{target}>.")
-        return
-
-    # save (add / edit): name + manager, both required. Manager = the person
-    # themselves marks them top of chain (their leave auto-approves).
+        _, errors = _parse_overrides(values)
+        return errors
+    # save (add / edit)
     name = (_value(values, "name").get("value") or "").strip()
     manager = _value(values, "manager").get("selected_user")
     errors = {}
@@ -571,19 +587,95 @@ def submit_manage_employees(ack, body, view, client, db, admin_ids):
     if name and employee_with_name(db, name, exclude_id=target):
         errors["name"] = "That name is already used by another employee — pick a distinct name."
     if errors:
-        ack(response_action="errors", errors=errors)
-        return
+        return errors
     # The user-picker always lists the app/Slackbot; block adding one as an employee
     # or manager (Slack gives no way to hide them from the picker itself).
     if _is_bot(client, target):
-        ack(response_action="errors", errors={"employee": "Pick a real person — that's an app/bot."})
-        return
+        return {"employee": "Pick a real person — that's an app/bot."}
     if manager != target and _is_bot(client, manager):
-        ack(response_action="errors", errors={"manager": "Pick a real person — that's an app/bot."})
+        return {"manager": "Pick a real person — that's an app/bot."}
+    return {}
+
+
+def submit_manage_employees_ack(ack, body, view, client, db, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate, returning inline errors or
+    closing the modal. The work (which can make slow Slack/calendar calls when leave
+    is settled) runs post-ack in submit_manage_employees_apply."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
         return
-    ack(response_action="clear")  # close the whole modal stack on success
+    values = view["state"]["values"]
+    target = _value(values, "employee").get("selected_user")
+    action = _manage_action(values)
+    errors = _manage_errors(values, client, db, target, action)
+    if errors:
+        ack(response_action="errors", errors=errors)
+    else:
+        ack(response_action="clear")  # close the whole modal stack on success
+
+
+def submit_manage_employees_apply(
+    body, view, client, db, admin_ids, calendar=None, sheets=None, today=None
+):
+    """Post-ack work: do the add/edit, override, or delete, settling in-flight leave
+    when a person is removed or re-orged (ADR-0009). Re-checks admin + validity because
+    Lambda lazy listeners fire regardless of the ack result; an invalid submission is
+    dropped (the user already saw the error)."""
+    today = today or date.today()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    values = view["state"]["values"]
+    target = _value(values, "employee").get("selected_user")
+    action = _manage_action(values)
+    if _manage_errors(values, client, db, target, action):
+        return
+
+    if action == "delete":
+        _settle_in_flight_leave(
+            db, client, calendar, sheets, target, EMPLOYEE_REMOVED_WITHDRAW, today,
+            include_approved=True,
+        )
+        delete_employee(db, target)
+        _notify(client, body["user"]["id"], f"🗑️ Removed <@{target}> from the leave system.")
+        return
+
+    if action == "override":
+        overrides, _ = _parse_overrides(values)
+        set_allowance_override(db, target, overrides)
+        what = "set" if overrides else "cleared"
+        _notify(client, body["user"]["id"], f"✅ Allowance override {what} for <@{target}>.")
+        return
+
+    # save (add / edit): name + manager. Manager = the person themselves marks them top
+    # of chain (their leave auto-approves). A manager change strands the employee's
+    # pending tickets (they sit in the old manager's DM, but the approver check reads
+    # the new manager), so settle them and ask the employee to re-file; approved leave
+    # is unaffected. Detected before the write so we can compare against the stored
+    # manager.
+    name = (_value(values, "name").get("value") or "").strip()
+    manager = _value(values, "manager").get("selected_user")
+    existing = get_employee(db, target)
+    manager_changed = existing is not None and existing["manager_id"] != manager
     upsert_employee(db, target, name, manager, allowances=None)
     _notify(client, body["user"]["id"], f"✅ Saved {name} (<@{target}>).")
+    if manager_changed:
+        withdrawn = _settle_in_flight_leave(
+            db, client, calendar, sheets, target, MANAGER_CHANGED_WITHDRAW, today,
+            include_approved=False,
+        )
+        if withdrawn:
+            _notify(
+                client,
+                target,
+                f"Your manager is now <@{manager}>. {withdrawn} pending request(s) were "
+                "withdrawn — please re-file them so they reach the right approver.",
+            )
+
+
+def submit_manage_employees(ack, body, view, client, db, admin_ids, calendar=None, sheets=None, today=None):
+    """Synchronous submit (Socket Mode / tests): validate-and-ack, then apply."""
+    submit_manage_employees_ack(ack, body, view, client, db, admin_ids)
+    submit_manage_employees_apply(body, view, client, db, admin_ids, calendar, sheets, today)
 
 
 def open_leave_modal(ack, body, client, db, today=None):
@@ -1035,12 +1127,37 @@ def _close_stale_ticket(client, channel, ts, request):
     )
 
 
+def _close_dead_ticket(client, channel, ts):
+    """A decision was attempted on a request whose row is gone — Clear wiped it, or
+    the employee was removed. Replace the ticket so its buttons vanish."""
+    client.chat_update(
+        channel=channel,
+        ts=ts,
+        text="No longer available",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "This request is no longer available — no action taken.",
+                },
+            }
+        ],
+    )
+
+
 def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
     request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
+    if request is None:
+        _close_dead_ticket(client, body["channel"]["id"], body["message"]["ts"])
+        return
     employee = get_employee(db, request["employee_id"])
+    if employee is None:
+        _close_dead_ticket(client, body["channel"]["id"], body["message"]["ts"])
+        return
 
     if body["user"]["id"] != employee["manager_id"]:
         _notify(client, body["user"]["id"], NOT_APPROVER)
@@ -1118,7 +1235,13 @@ def handle_decline_submit(ack, body, view, client, db):
     reason = view["state"]["values"]["decline_reason"]["value"].get("value")
 
     request = get_request(db, request_id)
+    if request is None:
+        _close_dead_ticket(client, meta["channel"], meta["ts"])
+        return
     employee = get_employee(db, request["employee_id"])
+    if employee is None:
+        _close_dead_ticket(client, meta["channel"], meta["ts"])
+        return
     if body["user"]["id"] != employee["manager_id"]:
         return
     if request["status"] != "pending":

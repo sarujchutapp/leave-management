@@ -85,6 +85,8 @@ from leave.handlers import (
     submit_leave_apply,
     submit_leave_limits,
     submit_manage_employees,
+    submit_manage_employees_ack,
+    submit_manage_employees_apply,
     submit_report,
     submit_report_ack,
     submit_report_apply,
@@ -232,13 +234,6 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             update_report_modal(ack, body, client, d, admin_ids)
 
-    # Manage-employees submit is an upsert or a delete (guarded by a small Scan) —
-    # fast, so it runs synchronously in both run modes.
-    @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
-    def _manage_employees_submit(ack, body, view, client):
-        with db.connect() as d:
-            submit_manage_employees(ack, body, view, client, d, admin_ids)
-
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):
         with db.connect() as d:
@@ -322,6 +317,22 @@ def build_app(calendar=None, faas=False):
 
         app.view(HOLIDAYS_CALLBACK_ID)(ack=_holidays_ack, lazy=[_holidays_lazy])
 
+        # Manage-employees submit: validate + close the modal in the ack phase, then do
+        # the write post-ack. Delete and a manager change settle the person's in-flight
+        # leave (calendar/board/ticket cleanup — slow Slack/calendar calls), so the work
+        # must run lazily to keep the ack under 3s.
+        def _manage_ack(ack, body, view, client):
+            with db.connect() as d:
+                submit_manage_employees_ack(ack, body, view, client, d, admin_ids)
+
+        def _manage_lazy(body, view, client):
+            with db.connect() as d:
+                submit_manage_employees_apply(
+                    body, view, client, d, admin_ids, get_calendar(), get_sheets()
+                )
+
+        app.view(MANAGE_EMPLOYEES_CALLBACK_ID)(ack=_manage_ack, lazy=[_manage_lazy])
+
         # Group-break submit: the ack rejects a bot pick (inline error) or closes the
         # picker, then the multi-person search + DM run post-ack so the ack stays
         # under 3s for larger groups. The lazy apply re-checks bots (it fires
@@ -397,6 +408,13 @@ def build_app(calendar=None, faas=False):
         def _holidays_submit(ack, body, view, client):
             with db.connect() as d:
                 submit_holidays(ack, body, view, d, get_calendar(), client, admin_ids)
+
+        @app.view(MANAGE_EMPLOYEES_CALLBACK_ID)
+        def _manage_employees_submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_manage_employees(
+                    ack, body, view, client, d, admin_ids, get_calendar(), get_sheets()
+                )
 
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):

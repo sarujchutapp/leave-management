@@ -115,6 +115,37 @@ def test_cannot_approve_cancelled_request(db):
     assert len(client.chat_update_calls) == 1  # stale ticket closed
 
 
+def test_approve_on_deleted_request_closes_ticket(db):
+    # Clear or an employee-delete removed the row, but the manager's ticket is
+    # still live. Clicking Approve must close it gracefully, not crash.
+    rid = _setup(db)
+    db.requests.delete_item(Key={"request_id": rid})
+    client, calendar = FakeSlackClient(), FakeCalendar()
+
+    handle_approve(
+        ack=FakeAck(), body=make_action_body(rid, "U_BOSS"), client=client, db=db, calendar=calendar
+    )
+
+    assert calendar.created == []  # nothing approved
+    assert client.chat_postMessage_calls == []  # no one notified
+    assert len(client.chat_update_calls) == 1  # dead ticket closed
+
+
+def test_approve_on_deleted_employee_closes_ticket(db):
+    # The employee was removed but a pending ticket for them is still live.
+    rid = _setup(db)
+    db.employees.delete_item(Key={"slack_user_id": "U_ALICE"})
+    client, calendar = FakeSlackClient(), FakeCalendar()
+
+    handle_approve(
+        ack=FakeAck(), body=make_action_body(rid, "U_BOSS"), client=client, db=db, calendar=calendar
+    )
+
+    assert calendar.created == []
+    assert _status(db, rid) == "pending"  # not approved
+    assert len(client.chat_update_calls) == 1  # dead ticket closed
+
+
 def test_cannot_double_approve(db):
     rid = _setup(db)
     calendar = FakeCalendar()
@@ -140,6 +171,22 @@ def test_cannot_decline_cancelled_request(db):
 
     assert _status(db, rid) == "cancelled"  # not flipped to declined
     assert len(client.chat_update_calls) == 1  # stale ticket closed
+
+
+def test_decline_on_deleted_request_closes_ticket(db):
+    # The request row is gone but the manager's ticket (and its Decline modal) live on.
+    rid = _setup(db)
+    db.requests.delete_item(Key={"request_id": rid})
+    client = FakeSlackClient()
+    meta = json.dumps({"request_id": str(rid), "channel": "C9", "ts": "222.2"})
+
+    handle_decline_submit(
+        ack=FakeAck(), body={"user": {"id": "U_BOSS"}}, view=make_decline_view(meta, "no"),
+        client=client, db=db,
+    )
+
+    assert len(client.chat_update_calls) == 1  # dead ticket closed
+    assert client.chat_postMessage_calls == []  # employee not notified
 
 
 def test_non_manager_cannot_decline(db):
