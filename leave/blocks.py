@@ -755,6 +755,19 @@ def build_leave_limits_modal(policy):
         blocks.append(
             _number_input("consecutive_limit", "Vacation consecutive limit (days)", consecutive)
         )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Lowering the vacation allowance takes effect immediately and can push "
+                    "balances negative for anyone who has already used more than the new amount "
+                    "(this blocks their new bookings until the year resets).",
+                }
+            ],
+        }
+    )
     return {
         "type": "modal",
         "callback_id": LEAVE_LIMITS_CALLBACK_ID,
@@ -783,6 +796,19 @@ def build_carry_over_modal(policy):
         )
     blocks.append(
         _number_input("max_total", "Max total (vacation days)", policy["max_total"]["vacation"])
+    )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Lowering a cap recomputes everyone's carry-in immediately — "
+                    "balances can drop, and go negative until the year resets (which blocks "
+                    "new bookings). Raising it back restores them.",
+                }
+            ],
+        }
     )
     return {
         "type": "modal",
