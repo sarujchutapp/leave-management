@@ -11,6 +11,7 @@ from leave.blocks import (
     CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CONFIRM_WORD,
     CONSECUTIVE_TOGGLE_ACTION,
+    HOLIDAYS_ACTION_SELECT,
     MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
     build_advance_modal,
@@ -407,6 +408,17 @@ def open_holidays(ack, body, client, db, admin_ids):
     )
 
 
+def _holiday_action(view):
+    return (
+        view["state"]["values"]
+        .get("holiday_action", {})
+        .get(HOLIDAYS_ACTION_SELECT, {})
+        .get("selected_option", {})
+        .get("value")
+        or "add"
+    )
+
+
 def _parse_holiday_submission(view):
     """(date_or_None, label_or_None, remove_iso_or_None) from the holidays modal."""
     values = view["state"]["values"]
@@ -418,36 +430,55 @@ def _parse_holiday_submission(view):
     return d, label, remove
 
 
+def update_holidays_modal(ack, body, client, db, admin_ids):
+    """Action select changed: re-render the modal in place so only the chosen mode's
+    fields show (Add → date + label, Remove → the current-holidays dropdown)."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    action = body["actions"][0]["selected_option"]["value"]
+    client.views_update(
+        view_id=body["view"]["id"], view=build_holidays_modal(all_holidays(db), action)
+    )
+
+
 def submit_holidays_ack(ack, body, view, admin_ids):
-    """Ack phase (under 3s): re-check admin and validate that exactly one action is
-    specified — a holiday to remove, or a date + label to add. Returns True when
-    valid so the caller runs the calendar+store change post-ack."""
+    """Ack phase (under 3s): re-check admin and validate the chosen mode's fields — Add
+    needs a date + label, Remove needs a holiday picked. Returns True when valid so the
+    caller runs the calendar+store change post-ack."""
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return False
     d, label, remove = _parse_holiday_submission(view)
-    if remove or (d and label):
-        ack(response_action="clear")  # close the whole modal stack on success
-        return True
-    if d and not label:
-        errors = {"holiday_label": "Add a label for the holiday."}
-    elif label and not d:
-        errors = {"holiday_date": "Pick the holiday's date."}
-    else:
-        errors = {"holiday_date": "Pick a holiday to remove, or enter a date and label to add."}
-    ack(response_action="errors", errors=errors)
-    return False
+    if _holiday_action(view) == "remove":
+        if remove:
+            ack(response_action="clear")  # close the whole modal stack on success
+            return True
+        ack(response_action="errors", errors={"holiday_remove": "Pick a holiday to remove."})
+        return False
+    errors = {}
+    if not d:
+        errors["holiday_date"] = "Pick the holiday's date."
+    if not label:
+        errors["holiday_label"] = "Add a label for the holiday."
+    if errors:
+        ack(response_action="errors", errors=errors)
+        return False
+    ack(response_action="clear")  # close the whole modal stack on success
+    return True
 
 
 def submit_holidays_apply(body, view, db, calendar, client, admin_ids):
-    """Post-ack work: apply the add (create/update the calendar event + store) or
-    the remove (delete the event + entry), then DM the admin. Re-checks admin +
-    validity because Lambda lazy listeners fire regardless of the ack result."""
+    """Post-ack work: apply the add (create the calendar event + store) or the remove
+    (delete the event + entry), then DM the admin. Re-checks admin + validity because
+    Lambda lazy listeners fire regardless of the ack result."""
     if not is_admin(body["user"]["id"], admin_ids):
         return
     d, label, remove = _parse_holiday_submission(view)
     user_id = body["user"]["id"]
-    if remove:
+    if _holiday_action(view) == "remove":
+        if not remove:
+            return
         removed = delete_holiday(db, date.fromisoformat(remove))
         if removed and removed.get("calendar_event_id"):
             calendar.delete_event(removed["calendar_event_id"])

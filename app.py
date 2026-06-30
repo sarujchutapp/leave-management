@@ -29,6 +29,7 @@ from leave.blocks import (
     CLEAR_ACTION,
     CLEAR_CALLBACK_ID,
     HOLIDAYS_ACTION,
+    HOLIDAYS_ACTION_SELECT,
     HOLIDAYS_CALLBACK_ID,
     DECLINE_ACTION,
     DECLINE_CALLBACK_ID,
@@ -59,6 +60,7 @@ from leave.handlers import (
     open_cancel_modal,
     open_group_picker,
     open_holidays,
+    update_holidays_modal,
     open_carry_over,
     open_clear,
     open_control_menu,
@@ -230,6 +232,12 @@ def build_app(calendar=None, faas=False):
     def _holidays(ack, body, client):
         with db.connect() as d:
             open_holidays(ack, body, client, d, admin_ids)
+
+    # Holidays Add/Remove select: re-render the modal in place (fast).
+    @app.action(HOLIDAYS_ACTION_SELECT)
+    def _holidays_action_changed(ack, body, client):
+        with db.connect() as d:
+            update_holidays_modal(ack, body, client, d, admin_ids)
 
     @app.action(MANAGE_ACTION_SELECT)
     def _manage_action_changed(ack, body, client):

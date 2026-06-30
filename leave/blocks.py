@@ -51,6 +51,7 @@ REPORT_ACTION = "control_report"
 MANAGE_EMPLOYEES_ACTION = "control_manage_employees"
 HOLIDAYS_CALLBACK_ID = "control_holidays_submit"
 HOLIDAYS_ACTION = "control_holidays"
+HOLIDAYS_ACTION_SELECT = "holiday_action_select"
 # Checkboxes that toggle whether a cap is enforced; toggling re-renders the modal.
 CONSECUTIVE_TOGGLE_ACTION = "control_enforce_consecutive"
 CARRY_OVER_TOGGLE_ACTION = "control_enable_carry_over"
@@ -590,55 +591,76 @@ _CONTROL_BUTTONS = [
 ]
 
 
-def build_holidays_modal(holidays):
-    """Admin holidays modal: add a holiday (date + label), or remove an existing
-    one. All inputs are optional; the submit applies a remove if one is picked,
-    otherwise an add. `holidays` is a list of (date, label, event_id) for the
-    remove dropdown (omitted when there are none yet)."""
+_HOLIDAY_ACTIONS = [
+    {"text": {"type": "plain_text", "text": "Add a holiday"}, "value": "add"},
+    {"text": {"type": "plain_text", "text": "Remove a holiday"}, "value": "remove"},
+]
+
+
+def build_holidays_modal(holidays, action="add"):
+    """Admin holidays modal. An Action select chooses Add or Remove and dispatches a
+    block action that re-renders this modal, so exactly one action is in play and its
+    fields are required (no ambiguous all-optional submit). Add shows a date + label;
+    Remove shows a dropdown of the current holidays (or a note when there are none).
+    `holidays` is a list of (date, label, event_id)."""
+    initial = next((o for o in _HOLIDAY_ACTIONS if o["value"] == action), _HOLIDAY_ACTIONS[0])
     blocks = [
         {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Add* a holiday (date + label), or *remove* one below.",
+            "type": "input",
+            "block_id": "holiday_action",
+            "dispatch_action": True,  # re-render the modal when the action changes
+            "label": {"type": "plain_text", "text": "Action"},
+            "element": {
+                "type": "static_select",
+                "action_id": HOLIDAYS_ACTION_SELECT,
+                "initial_option": initial,
+                "options": _HOLIDAY_ACTIONS,
             },
         },
-        {
-            "type": "input",
-            "block_id": "holiday_date",
-            "optional": True,
-            "label": {"type": "plain_text", "text": "Date"},
-            "element": {"type": "datepicker", "action_id": "value"},
-        },
-        {
-            "type": "input",
-            "block_id": "holiday_label",
-            "optional": True,
-            "label": {"type": "plain_text", "text": "Label"},
-            "element": {"type": "plain_text_input", "action_id": "value"},
-        },
     ]
-    if holidays:
-        blocks.append(
+    if action == "remove":
+        if holidays:
+            blocks.append(
+                {
+                    "type": "input",
+                    "block_id": "holiday_remove",
+                    "label": {"type": "plain_text", "text": "Holiday to remove"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "value",
+                        "placeholder": {"type": "plain_text", "text": "Pick one to remove"},
+                        "options": [
+                            {
+                                "text": {"type": "plain_text", "text": f"{d.isoformat()} — {label}"[:75]},
+                                "value": d.isoformat(),
+                            }
+                            for d, label, _ in holidays
+                        ],
+                    },
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "No holidays to remove yet."}],
+                }
+            )
+    else:  # add
+        blocks += [
             {
                 "type": "input",
-                "block_id": "holiday_remove",
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Remove a holiday"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick one to remove"},
-                    "options": [
-                        {
-                            "text": {"type": "plain_text", "text": f"{d.isoformat()} — {label}"[:75]},
-                            "value": d.isoformat(),
-                        }
-                        for d, label, _ in holidays
-                    ],
-                },
-            }
-        )
+                "block_id": "holiday_date",
+                "label": {"type": "plain_text", "text": "Date"},
+                "element": {"type": "datepicker", "action_id": "value"},
+            },
+            {
+                "type": "input",
+                "block_id": "holiday_label",
+                "label": {"type": "plain_text", "text": "Label"},
+                "element": {"type": "plain_text_input", "action_id": "value"},
+            },
+        ]
     return {
         "type": "modal",
         "callback_id": HOLIDAYS_CALLBACK_ID,

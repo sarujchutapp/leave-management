@@ -7,6 +7,7 @@ from leave.blocks import (
     CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CALLBACK_ID,
     CONTROL_MENU_CALLBACK_ID,
+    HOLIDAYS_ACTION_SELECT,
     HOLIDAYS_CALLBACK_ID,
     CONSECUTIVE_TOGGLE_ACTION,
     LEAVE_LIMITS_ACTION,
@@ -40,6 +41,7 @@ from leave.handlers import (
     submit_leave_limits,
     submit_manage_employees,
     submit_report,
+    update_holidays_modal,
     update_manage_modal,
     update_report_modal,
 )
@@ -1508,11 +1510,12 @@ def test_manage_delete_after_reassigning_reports_succeeds(db):
     assert get_employee(db, "U_M") is None
 
 
-def _holidays_view(holiday_date=None, label=None, remove=None):
+def _holidays_view(action="add", holiday_date=None, label=None, remove=None):
     """A view_submission state payload matching build_holidays_modal."""
     return {
         "state": {
             "values": {
+                "holiday_action": {HOLIDAYS_ACTION_SELECT: {"selected_option": {"value": action}}},
                 "holiday_date": {"value": {"selected_date": holiday_date}},
                 "holiday_label": {"value": {"value": label}},
                 "holiday_remove": {
@@ -1523,7 +1526,7 @@ def _holidays_view(holiday_date=None, label=None, remove=None):
     }
 
 
-def test_holidays_modal_opens_for_admin(db):
+def test_holidays_modal_defaults_to_add_mode(db):
     upsert_holiday(db, date(2026, 4, 13), "Songkran")
     client = FakeSlackClient()
     open_holidays(
@@ -1536,7 +1539,42 @@ def test_holidays_modal_opens_for_admin(db):
     view = client.views_push_calls[0]["view"]
     assert view["callback_id"] == HOLIDAYS_CALLBACK_ID
     ids = {b.get("block_id") for b in view["blocks"]}
-    assert {"holiday_date", "holiday_label", "holiday_remove"} <= ids  # remove shown (one exists)
+    assert {"holiday_action", "holiday_date", "holiday_label"} <= ids
+    assert "holiday_remove" not in ids  # the remove picker only shows in remove mode
+
+
+def test_holidays_switch_to_remove_lists_existing(db):
+    upsert_holiday(db, date(2026, 4, 13), "Songkran")
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "remove"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_update_calls[0]["view"]
+    ids = {b.get("block_id") for b in view["blocks"]}
+    assert "holiday_remove" in ids
+    assert "holiday_date" not in ids  # add fields hidden in remove mode
+    block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_remove")
+    assert [o["value"] for o in block["element"]["options"]] == ["2026-04-13"]
+
+
+def test_holidays_remove_mode_with_none_shows_note(db):
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "remove"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_update_calls[0]["view"]
+    assert "holiday_remove" not in {b.get("block_id") for b in view["blocks"]}
+    assert any("No holidays to remove" in str(b) for b in view["blocks"])
 
 
 def test_holidays_add_creates_event_and_stores(db):
@@ -1545,7 +1583,7 @@ def test_holidays_add_creates_event_and_stores(db):
     submit_holidays(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        view=_holidays_view(holiday_date="2026-04-13", label="Songkran"),
+        view=_holidays_view(action="add", holiday_date="2026-04-13", label="Songkran"),
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
@@ -1563,7 +1601,7 @@ def test_holidays_remove_deletes_event_and_entry(db):
     submit_holidays(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
-        view=_holidays_view(remove="2026-04-13"),
+        view=_holidays_view(action="remove", remove="2026-04-13"),
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
@@ -1579,7 +1617,7 @@ def test_holidays_add_requires_date_and_label(db):
     submit_holidays(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        view=_holidays_view(holiday_date="2026-04-13"),  # label missing
+        view=_holidays_view(action="add", holiday_date="2026-04-13"),  # label missing
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
@@ -1591,12 +1629,28 @@ def test_holidays_add_requires_date_and_label(db):
     assert cal.created == []
 
 
+def test_holidays_remove_without_selection_errors(db):
+    cal = FakeCalendar()
+    ack = FakeAck()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(action="remove"),  # nothing picked
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "holiday_remove" in ack.response["errors"]
+
+
 def test_holidays_non_admin_submit_rejected(db):
     cal = FakeCalendar()
     submit_holidays(
         ack=FakeAck(),
         body={"user": {"id": "U_OTHER"}},
-        view=_holidays_view(holiday_date="2026-04-13", label="Songkran"),
+        view=_holidays_view(action="add", holiday_date="2026-04-13", label="Songkran"),
         db=db,
         calendar=cal,
         client=FakeSlackClient(),
