@@ -24,6 +24,8 @@ from leave.blocks import (
     GROUP_PICK_ACTION,
     CARRY_OVER_ACTION,
     CARRY_OVER_CALLBACK_ID,
+    CARRY_OVER_TOGGLE_ACTION,
+    CONSECUTIVE_TOGGLE_ACTION,
     CLEAR_ACTION,
     CLEAR_CALLBACK_ID,
     HOLIDAYS_ACTION,
@@ -64,6 +66,8 @@ from leave.handlers import (
     open_leave_modal,
     open_manage_employees,
     update_manage_modal,
+    update_carry_over_modal,
+    update_leave_limits_modal,
     open_report,
     open_view_settings,
     update_report_modal,
@@ -195,6 +199,12 @@ def build_app(calendar=None, faas=False):
         with db.connect() as d:
             open_leave_limits(ack, body, client, d, admin_ids)
 
+    # Enforce-consecutive-limit checkbox: re-render the modal in place (fast).
+    @app.action(CONSECUTIVE_TOGGLE_ACTION)
+    def _consecutive_toggle(ack, body, client):
+        with db.connect() as d:
+            update_leave_limits_modal(ack, body, client, d, admin_ids)
+
     # Leave-limits submit is validate + a single PutItem (fast, well under 3s), so
     # it runs synchronously in both run modes rather than as a lazy listener.
     @app.view(LEAVE_LIMITS_CALLBACK_ID)
@@ -206,6 +216,12 @@ def build_app(calendar=None, faas=False):
     def _carry_over(ack, body, client):
         with db.connect() as d:
             open_carry_over(ack, body, client, d, admin_ids)
+
+    # Enable-carry-over checkbox: re-render the modal in place (fast).
+    @app.action(CARRY_OVER_TOGGLE_ACTION)
+    def _carry_over_toggle(ack, body, client):
+        with db.connect() as d:
+            update_carry_over_modal(ack, body, client, d, admin_ids)
 
     @app.action(CLEAR_ACTION)
     def _clear(ack, body, client):

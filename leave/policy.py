@@ -21,7 +21,8 @@ DEFAULT_POLICY = {
 
 
 def _ints(m):
-    return {k: int(v) for k, v in m.items()}
+    # A cap may be None ("no limit" — e.g. a disabled consecutive limit); keep it None.
+    return {k: (int(v) if v is not None else None) for k, v in m.items()}
 
 
 def get_policy(db):

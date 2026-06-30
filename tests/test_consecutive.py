@@ -31,6 +31,19 @@ def test_short_vacation_request_passes(db):
     assert errors == {}
 
 
+def test_disabled_consecutive_limit_allows_any_run(db):
+    # An admin can turn the cap off (stored as None); then no run is too long.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        consecutive_limit={"vacation": None},
+    )
+    emp = _alice(db)
+    # 22 calendar days — would exceed the old 15-day cap, but the cap is off.
+    errors = validate_request(db, emp, "vacation", date(2026, 6, 1), date(2026, 6, 22), TODAY)
+    assert "start_date" not in errors
+
+
 def test_existing_leave_bridged_by_weekend_extends_run(db):
     emp = _alice(db)
     rid = create_request(db, "U_A", "vacation", date(2026, 6, 1), date(2026, 6, 5), None)

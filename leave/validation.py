@@ -44,7 +44,7 @@ def validate_request(db, employee, leave_type, start, end, today, half=None):
     if leave_type == "vacation" and not half and "start_date" not in errors:
         cap = get_policy(db)["consecutive_limit"]["vacation"]
         run = continuous_absence_length(db, employee["slack_user_id"], start, end)
-        if run > cap:
+        if cap is not None and run > cap:
             errors["start_date"] = (
                 f"This would be {run} consecutive days away; the limit is {cap}."
             )

@@ -8,7 +8,9 @@ import json
 from datetime import date
 
 from leave.blocks import (
+    CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CONFIRM_WORD,
+    CONSECUTIVE_TOGGLE_ACTION,
     MANAGE_ACTION_SELECT,
     REPORT_TYPE_ACTION,
     build_advance_modal,
@@ -35,7 +37,7 @@ from leave.blocks import (
 from leave.board import update_board
 from leave.calendar_client import color_id_for
 from leave.db import employee_with_name, get_employee, list_employees, list_reports
-from leave.policy import get_policy, set_policy
+from leave.policy import DEFAULT_POLICY, get_policy, set_policy
 from leave.report import (
     build_burnout_csv,
     build_history_csv,
@@ -110,9 +112,15 @@ def open_view_settings(ack, body, client, db, admin_ids):
     client.views_push(trigger_id=body["trigger_id"], view=build_settings_view(get_policy(db)))
 
 
-# Block_ids of the leave-limits modal, also the keys of the parsed values. The
-# first three are per-type allowances; the last is the vacation consecutive limit.
-_LIMIT_FIELDS = ("sick", "vacation", "personal", "consecutive_limit")
+# Block_ids of the per-type allowance inputs in the leave-limits modal (also the keys
+# of the parsed values). The vacation consecutive limit is a separate, optional input.
+_ALLOWANCE_FIELDS = ("sick", "vacation", "personal")
+
+
+def _checkbox_on(values, block_id, action_id):
+    """Whether a single-option checkbox in a modal is ticked."""
+    selected = values.get(block_id, {}).get(action_id, {}).get("selected_options") or []
+    return len(selected) > 0
 
 
 def open_leave_limits(ack, body, client, db, admin_ids):
@@ -122,6 +130,22 @@ def open_leave_limits(ack, body, client, db, admin_ids):
     if not is_admin(body["user"]["id"], admin_ids):
         return
     client.views_push(trigger_id=body["trigger_id"], view=build_leave_limits_modal(get_policy(db)))
+
+
+def update_leave_limits_modal(ack, body, client, db, admin_ids):
+    """Enforce-consecutive-limit checkbox toggled: re-render the modal in place so the
+    number field shows only when the cap is enforced. Rebuilds from the stored policy
+    (unsaved edits revert — the modal is touched rarely); enabling from off seeds the
+    number with the shipped default."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    enforce = bool(body["actions"][0].get("selected_options"))
+    policy = get_policy(db)
+    value = DEFAULT_POLICY["consecutive_limit"]["vacation"] if enforce else None
+    if not enforce or policy["consecutive_limit"]["vacation"] is None:
+        policy = {**policy, "consecutive_limit": {"vacation": value}}
+    client.views_update(view_id=body["view"]["id"], view=build_leave_limits_modal(policy))
 
 
 def _parse_int(raw):
@@ -136,25 +160,39 @@ def _parse_int(raw):
 
 
 def submit_leave_limits(ack, body, view, client, db, admin_ids):
-    """Leave limits submit: re-check admin, validate every field, and on success
-    write the new allowances + consecutive limit. Reads the current policy to keep
-    the carry-over caps (set_policy overwrites the whole item) intact."""
+    """Leave limits submit: re-check admin, validate the allowances and (when enforced)
+    the consecutive limit, and on success write them. Unchecking "Enforce consecutive
+    limit" stores None (no cap). Reads the current policy to keep the carry-over caps
+    (set_policy overwrites the whole item) intact."""
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return
     values = view["state"]["values"]
     parsed, errors = {}, {}
-    for field in _LIMIT_FIELDS:
+    for field in _ALLOWANCE_FIELDS:
         n, err = _parse_int(values[field]["value"]["value"])
         if err:
             errors[field] = err
         else:
             parsed[field] = n
+    consecutive = None
+    if _checkbox_on(values, "enforce_consecutive", CONSECUTIVE_TOGGLE_ACTION):
+        consecutive, err = _parse_int(values["consecutive_limit"]["value"]["value"])
+        if err:
+            errors["consecutive_limit"] = err
+    policy = get_policy(db)
+    # Vacation allowance can't exceed Max total, or everyone is silently capped below
+    # the allowance just set. Max total lives in the Carry-over modal, so check here.
+    max_total = policy["max_total"]["vacation"]
+    if "vacation" in parsed and parsed["vacation"] > max_total:
+        errors["vacation"] = (
+            f"Vacation allowance can't exceed Max total ({max_total}). "
+            "Raise Max total in Carry-over first."
+        )
     if errors:
         ack(response_action="errors", errors=errors)
         return
     ack(response_action="clear")  # close the whole modal stack on success
-    policy = get_policy(db)
     set_policy(
         db,
         allowances={
@@ -164,13 +202,14 @@ def submit_leave_limits(ack, body, view, client, db, admin_ids):
         },
         max_carry_over=policy["max_carry_over"],
         max_total=policy["max_total"],
-        consecutive_limit={"vacation": parsed["consecutive_limit"]},
+        consecutive_limit={"vacation": consecutive},
     )
     _notify(
         client,
         body["user"]["id"],
         f"✅ Leave limits updated — sick {parsed['sick']}, vacation {parsed['vacation']}, "
-        f"personal {parsed['personal']}, consecutive limit {parsed['consecutive_limit']}.",
+        f"personal {parsed['personal']}, consecutive limit "
+        f"{consecutive if consecutive is not None else 'off'}.",
     )
 
 
@@ -187,16 +226,49 @@ def open_carry_over(ack, body, client, db, admin_ids):
     client.views_push(trigger_id=body["trigger_id"], view=build_carry_over_modal(get_policy(db)))
 
 
-def _parse_carry_over(view):
-    """(parsed, errors) for the carry-over modal — non-negative whole numbers."""
+def update_carry_over_modal(ack, body, client, db, admin_ids):
+    """Enable-carry-over checkbox toggled: re-render in place so the Max carry over field
+    shows only when carry-over is on. Rebuilds from the stored policy (unsaved edits
+    revert — rarely touched); enabling from off seeds the field with the shipped default."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    enabled = bool(body["actions"][0].get("selected_options"))
+    policy = get_policy(db)
+    current = policy["max_carry_over"]["vacation"]
+    if enabled:
+        value = current if current > 0 else DEFAULT_POLICY["max_carry_over"]["vacation"]
+    else:
+        value = 0
+    policy = {**policy, "max_carry_over": {"vacation": value}}
+    client.views_update(view_id=body["view"]["id"], view=build_carry_over_modal(policy))
+
+
+def _parse_carry_over(view, db):
+    """(parsed, errors) for the carry-over modal. Max total is a required non-negative
+    whole number; max carry over is parsed only when "Enable carry-over" is ticked,
+    else it is 0 (carry-over disabled — nothing rolls over). Enforces the invariants
+    Max total >= vacation allowance and Max carry over <= Max total."""
     values = view["state"]["values"]
     parsed, errors = {}, {}
-    for field in _CARRY_FIELDS:
-        n, err = _parse_int(values[field]["value"]["value"])
+    max_total, err = _parse_int(values["max_total"]["value"]["value"])
+    if err:
+        errors["max_total"] = err
+    else:
+        parsed["max_total"] = max_total
+    if _checkbox_on(values, "enable_carry_over", CARRY_OVER_TOGGLE_ACTION):
+        mco, err = _parse_int(values["max_carry_over"]["value"]["value"])
         if err:
-            errors[field] = err
+            errors["max_carry_over"] = err
         else:
-            parsed[field] = n
+            parsed["max_carry_over"] = mco
+    else:
+        parsed["max_carry_over"] = 0
+    allowance = get_policy(db)["allowances"]["vacation"]
+    if "max_total" in parsed and parsed["max_total"] < allowance:
+        errors["max_total"] = f"Max total can't be below the vacation allowance ({allowance})."
+    elif "max_total" in parsed and "max_carry_over" in parsed and parsed["max_carry_over"] > parsed["max_total"]:
+        errors["max_carry_over"] = f"Max carry over can't exceed Max total ({parsed['max_total']})."
     return parsed, errors
 
 
@@ -206,7 +278,7 @@ def submit_carry_over_ack(ack, body, view, db, admin_ids):
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return False
-    parsed, errors = _parse_carry_over(view)
+    parsed, errors = _parse_carry_over(view, db)
     if errors:
         ack(response_action="errors", errors=errors)
         return False
@@ -230,7 +302,7 @@ def submit_carry_over_apply(body, view, db, client, admin_ids, today=None):
     today = today or date.today()
     if not is_admin(body["user"]["id"], admin_ids):
         return
-    _, errors = _parse_carry_over(view)
+    _, errors = _parse_carry_over(view, db)
     if errors:
         return
     count = recompute_all_carry_in(db, today.year)

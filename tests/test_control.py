@@ -4,9 +4,11 @@ from datetime import date
 
 from leave.blocks import (
     CARRY_OVER_CALLBACK_ID,
+    CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CALLBACK_ID,
     CONTROL_MENU_CALLBACK_ID,
     HOLIDAYS_CALLBACK_ID,
+    CONSECUTIVE_TOGGLE_ACTION,
     LEAVE_LIMITS_ACTION,
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_ACTION_SELECT,
@@ -30,6 +32,8 @@ from leave.handlers import (
     open_manage_employees,
     open_report,
     open_view_settings,
+    update_carry_over_modal,
+    update_leave_limits_modal,
     submit_carry_over,
     submit_clear,
     submit_holidays,
@@ -65,7 +69,7 @@ def _input_initial(view, block_id):
     return block["element"].get("initial_value")
 
 
-def _leave_limits_view(sick, vacation, personal, consecutive):
+def _leave_limits_view(sick, vacation, personal, consecutive, enforce_consecutive=True):
     """A view_submission state payload matching build_leave_limits_modal."""
     return {
         "state": {
@@ -74,18 +78,28 @@ def _leave_limits_view(sick, vacation, personal, consecutive):
                 "vacation": {"value": {"value": str(vacation)}},
                 "personal": {"value": {"value": str(personal)}},
                 "consecutive_limit": {"value": {"value": str(consecutive)}},
+                "enforce_consecutive": {
+                    CONSECUTIVE_TOGGLE_ACTION: {
+                        "selected_options": [{"value": "on"}] if enforce_consecutive else []
+                    }
+                },
             }
         }
     }
 
 
-def _carry_over_view(max_carry_over, max_total):
+def _carry_over_view(max_carry_over, max_total, enable=True):
     """A view_submission state payload matching build_carry_over_modal."""
     return {
         "state": {
             "values": {
                 "max_carry_over": {"value": {"value": str(max_carry_over)}},
                 "max_total": {"value": {"value": str(max_total)}},
+                "enable_carry_over": {
+                    CARRY_OVER_TOGGLE_ACTION: {
+                        "selected_options": [{"value": "on"}] if enable else []
+                    }
+                },
             }
         }
     }
@@ -203,6 +217,29 @@ def test_view_settings_renders_current_policy(db):
     assert "14" in text  # consecutive limit
 
 
+def test_view_settings_shows_disabled_caps(db):
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 12, "personal": 5},
+        max_carry_over={"vacation": 0},
+        max_total={"vacation": 16},
+        consecutive_limit={"vacation": None},
+    )
+    client = FakeSlackClient()
+    open_view_settings(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    text = " ".join(
+        b["text"]["text"] for b in client.views_push_calls[0]["view"]["blocks"] if b["type"] == "section"
+    )
+    assert "No limit" in text  # consecutive limit off
+    assert "disabled" in text.lower()  # carry-over off
+
+
 def test_view_settings_rejects_non_admin(db):
     set_policy(db)
     client = FakeSlackClient()
@@ -245,6 +282,64 @@ def test_leave_limits_modal_prefilled_with_current_policy(db):
     assert _input_initial(view, "consecutive_limit") == "14"
 
 
+def test_leave_limits_modal_hides_consecutive_when_disabled(db):
+    # With the cap off (None), the modal opens with the checkbox unchecked and the
+    # number field hidden (render-from-state).
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        consecutive_limit={"vacation": None},
+    )
+    client = FakeSlackClient()
+    open_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_push_calls[0]["view"]
+    ids = {b.get("block_id") for b in view["blocks"]}
+    assert "enforce_consecutive" in ids  # checkbox present
+    assert "consecutive_limit" not in ids  # number hidden when off
+    checkbox = next(b for b in view["blocks"] if b.get("block_id") == "enforce_consecutive")
+    assert "initial_options" not in checkbox["element"]  # unchecked
+
+
+def test_leave_limits_toggle_consecutive_rerenders(db):
+    # Toggling the checkbox re-renders in place: enabling shows the number field,
+    # disabling hides it.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        consecutive_limit={"vacation": None},
+    )
+    client = FakeSlackClient()
+    update_leave_limits_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_options": [{"value": "on"}]}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert client.views_update_calls[0]["view_id"] == "V1"
+    assert "consecutive_limit" in {
+        b.get("block_id") for b in client.views_update_calls[0]["view"]["blocks"]
+    }
+    update_leave_limits_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_options": []}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert "consecutive_limit" not in {
+        b.get("block_id") for b in client.views_update_calls[1]["view"]["blocks"]
+    }
+
+
 def test_leave_limits_submit_updates_policy(db):
     set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
     client = FakeSlackClient()
@@ -266,7 +361,8 @@ def test_leave_limits_submit_updates_policy(db):
 
 def test_leave_limits_change_flows_live_into_balances(db):
     upsert_employee(db, "U_E", "Eve", None)
-    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
+    # Max total >= the new allowance so the invariant is satisfied.
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_total={"vacation": 20})
     submit_leave_limits(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}},
@@ -301,6 +397,20 @@ def test_leave_limits_preserves_carry_over_caps(db):
     assert p["max_total"]["vacation"] == 16
 
 
+def test_leave_limits_disable_consecutive_stores_none(db):
+    # Unchecking "Enforce consecutive limit" stores None (no cap), ignoring the number.
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, consecutive_limit={"vacation": 15})
+    submit_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(30, 10, 5, 15, enforce_consecutive=False),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert get_policy(db)["consecutive_limit"]["vacation"] is None
+
+
 def test_leave_limits_invalid_input_writes_nothing(db):
     set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
     ack = FakeAck()
@@ -316,6 +426,24 @@ def test_leave_limits_invalid_input_writes_nothing(db):
     assert set(ack.response["errors"]) == {"sick", "vacation"}
     # Nothing written: policy unchanged.
     assert get_policy(db)["allowances"] == {"sick": 30, "vacation": 10, "personal": 5}
+
+
+def test_leave_limits_vacation_allowance_capped_by_max_total(db):
+    # A vacation allowance above the stored Max total would silently cap everyone below
+    # it — block it (the cross-modal invariant from grilling #2).
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_leave_limits(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(30, 20, 5, 15),  # vacation 20 > max total 15
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "vacation" in ack.response["errors"]
+    assert get_policy(db)["allowances"]["vacation"] == 10  # nothing written
 
 
 def test_leave_limits_non_admin_submit_rejected(db):
@@ -352,6 +480,50 @@ def test_carry_over_modal_prefilled_with_current_caps(db):
     assert view["callback_id"] == CARRY_OVER_CALLBACK_ID
     assert _input_initial(view, "max_carry_over") == "7"
     assert _input_initial(view, "max_total") == "18"
+
+
+def test_carry_over_modal_hides_field_when_disabled(db):
+    # max_carry_over 0 = carry-over off: checkbox unchecked, max carry over field
+    # hidden, max total still shown.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 0},
+        max_total={"vacation": 15},
+    )
+    client = FakeSlackClient()
+    open_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    ids = {b.get("block_id") for b in client.views_push_calls[0]["view"]["blocks"]}
+    assert "enable_carry_over" in ids
+    assert "max_carry_over" not in ids  # hidden when disabled
+    assert "max_total" in ids  # always shown
+
+
+def test_carry_over_toggle_rerenders(db):
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 0},
+        max_total={"vacation": 15},
+    )
+    client = FakeSlackClient()
+    update_carry_over_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_options": [{"value": "on"}]}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert "max_carry_over" in {
+        b.get("block_id") for b in client.views_update_calls[0]["view"]["blocks"]
+    }
 
 
 def test_carry_over_submit_updates_policy_preserving_allowances(db):
@@ -418,6 +590,54 @@ def test_recompute_all_carry_in_skips_policy_item(db):
     policy_item = db.employees.get_item(Key={"slack_user_id": POLICY_KEY}).get("Item")
     assert "carry_in" not in policy_item
     assert get_employee(db, "U_A")["carry_in"]["2027"] == 5
+
+
+def test_carry_over_disable_stores_zero(db):
+    # Unchecking "Enable carry-over" stores max_carry_over 0 (nothing rolls over).
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_carry_over={"vacation": 5}, max_total={"vacation": 15})
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, enable=False),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert get_policy(db)["max_carry_over"]["vacation"] == 0
+
+
+def test_carry_over_max_total_below_allowance_blocked(db):
+    set_policy(db, allowances={"sick": 30, "vacation": 12, "personal": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 10),  # max total 10 < vacation allowance 12
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "max_total" in ack.response["errors"]
+    assert get_policy(db)["max_total"]["vacation"] == 15  # unchanged
+
+
+def test_carry_over_exceeding_max_total_blocked(db):
+    set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5}, max_carry_over={"vacation": 5}, max_total={"vacation": 15})
+    ack = FakeAck()
+    submit_carry_over(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(20, 15),  # max carry over 20 > max total 15
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "max_carry_over" in ack.response["errors"]
 
 
 def test_carry_over_invalid_input_writes_nothing(db):

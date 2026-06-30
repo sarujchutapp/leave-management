@@ -51,6 +51,9 @@ REPORT_ACTION = "control_report"
 MANAGE_EMPLOYEES_ACTION = "control_manage_employees"
 HOLIDAYS_CALLBACK_ID = "control_holidays_submit"
 HOLIDAYS_ACTION = "control_holidays"
+# Checkboxes that toggle whether a cap is enforced; toggling re-renders the modal.
+CONSECUTIVE_TOGGLE_ACTION = "control_enforce_consecutive"
+CARRY_OVER_TOGGLE_ACTION = "control_enable_carry_over"
 
 
 def format_period(start, end, half=None):
@@ -691,49 +694,81 @@ def _number_input(block_id, label, value):
     }
 
 
+def _toggle_checkbox(block_id, action_id, label, checked):
+    """A single-option checkbox that re-renders the modal when toggled."""
+    option = {"text": {"type": "plain_text", "text": label}, "value": "on"}
+    element = {"type": "checkboxes", "action_id": action_id, "options": [option]}
+    if checked:
+        element["initial_options"] = [option]
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "optional": True,
+        "dispatch_action": True,
+        "label": {"type": "plain_text", "text": label},
+        "element": element,
+    }
+
+
 def build_leave_limits_modal(policy):
-    """Edit base allowance per type + the vacation consecutive limit, pre-filled
-    from the current central policy."""
+    """Edit base allowance per type + the vacation consecutive limit, pre-filled from
+    the current central policy. The consecutive limit can be turned off (checkbox); when
+    off, its number field is hidden (rendered from the stored state at open, re-rendered
+    on toggle)."""
     allowances = policy["allowances"]
+    consecutive = policy["consecutive_limit"]["vacation"]
+    enforce = consecutive is not None
+    blocks = [
+        _number_input("sick", "Sick allowance (days)", allowances["sick"]),
+        _number_input("vacation", "Vacation allowance (days)", allowances["vacation"]),
+        _number_input("personal", "Personal allowance (days)", allowances["personal"]),
+        _toggle_checkbox(
+            "enforce_consecutive",
+            CONSECUTIVE_TOGGLE_ACTION,
+            "Enforce a consecutive limit on vacation",
+            enforce,
+        ),
+    ]
+    if enforce:
+        blocks.append(
+            _number_input("consecutive_limit", "Vacation consecutive limit (days)", consecutive)
+        )
     return {
         "type": "modal",
         "callback_id": LEAVE_LIMITS_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Leave Limits"},
         "submit": {"type": "plain_text", "text": "Save"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            _number_input("sick", "Sick allowance (days)", allowances["sick"]),
-            _number_input("vacation", "Vacation allowance (days)", allowances["vacation"]),
-            _number_input("personal", "Personal allowance (days)", allowances["personal"]),
-            _number_input(
-                "consecutive_limit",
-                "Vacation consecutive limit (days)",
-                policy["consecutive_limit"]["vacation"],
-            ),
-        ],
+        "blocks": blocks,
     }
 
 
 def build_carry_over_modal(policy):
-    """Edit the vacation carry-over caps, pre-filled from the current central policy."""
+    """Edit the vacation carry-over caps, pre-filled from the current central policy.
+    Carry-over can be turned off (checkbox); when off (max carry over 0) its field is
+    hidden. Max total is always shown. Rendered from the stored state at open,
+    re-rendered on toggle."""
+    max_carry_over = policy["max_carry_over"]["vacation"]
+    enabled = max_carry_over > 0
+    blocks = [
+        _toggle_checkbox(
+            "enable_carry_over", CARRY_OVER_TOGGLE_ACTION, "Enable carry-over", enabled
+        ),
+    ]
+    if enabled:
+        blocks.append(
+            _number_input("max_carry_over", "Max carry over (vacation days)", max_carry_over)
+        )
+    blocks.append(
+        _number_input("max_total", "Max total (vacation days)", policy["max_total"]["vacation"])
+    )
     return {
         "type": "modal",
         "callback_id": CARRY_OVER_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Carry-over"},
         "submit": {"type": "plain_text", "text": "Save"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            _number_input(
-                "max_carry_over",
-                "Max carry over (vacation days)",
-                policy["max_carry_over"]["vacation"],
-            ),
-            _number_input(
-                "max_total",
-                "Max total (vacation days)",
-                policy["max_total"]["vacation"],
-            ),
-        ],
+        "blocks": blocks,
     }
 
 
@@ -973,11 +1008,15 @@ def build_settings_view(policy):
     allowances = "   ·   ".join(
         f"*{t}*: {policy['allowances'][t]}" for t in LEAVE_TYPES
     )
+    max_carry_over = policy["max_carry_over"]["vacation"]
+    carry_over = "disabled" if max_carry_over == 0 else max_carry_over
+    consecutive = policy["consecutive_limit"]["vacation"]
+    consecutive_text = "No limit" if consecutive is None else consecutive
     lines = [
         f"*Allowances* — {allowances}",
-        f"*Max carry over* (vacation): {policy['max_carry_over']['vacation']}",
+        f"*Max carry over* (vacation): {carry_over}",
         f"*Max total* (vacation): {policy['max_total']['vacation']}",
-        f"*Consecutive limit* (vacation): {policy['consecutive_limit']['vacation']}",
+        f"*Consecutive limit* (vacation): {consecutive_text}",
     ]
     return {
         "type": "modal",
