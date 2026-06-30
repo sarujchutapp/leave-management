@@ -159,14 +159,11 @@ def _parse_int(raw):
     return n, None
 
 
-def submit_leave_limits(ack, body, view, client, db, admin_ids):
-    """Leave limits submit: re-check admin, validate the allowances and (when enforced)
-    the consecutive limit, and on success write them. Unchecking "Enforce consecutive
-    limit" stores None (no cap). Reads the current policy to keep the carry-over caps
-    (set_policy overwrites the whole item) intact."""
-    if not is_admin(body["user"]["id"], admin_ids):
-        ack()
-        return
+def _parse_leave_limits(view, db):
+    """(allowances, consecutive_or_None, errors) for the leave-limits modal. Allowances
+    are required non-negative whole numbers; the consecutive limit is parsed only when
+    enforced (else None). Enforces Vacation allowance <= Max total (which lives in the
+    Carry-over modal, so it's checked here)."""
     values = view["state"]["values"]
     parsed, errors = {}, {}
     for field in _ALLOWANCE_FIELDS:
@@ -180,19 +177,41 @@ def submit_leave_limits(ack, body, view, client, db, admin_ids):
         consecutive, err = _parse_int(values["consecutive_limit"]["value"]["value"])
         if err:
             errors["consecutive_limit"] = err
-    policy = get_policy(db)
-    # Vacation allowance can't exceed Max total, or everyone is silently capped below
-    # the allowance just set. Max total lives in the Carry-over modal, so check here.
-    max_total = policy["max_total"]["vacation"]
+    max_total = get_policy(db)["max_total"]["vacation"]
     if "vacation" in parsed and parsed["vacation"] > max_total:
         errors["vacation"] = (
             f"Vacation allowance can't exceed Max total ({max_total}). "
             "Raise Max total in Carry-over first."
         )
+    return parsed, consecutive, errors
+
+
+def submit_leave_limits_ack(ack, body, view, db, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate, closing the modal or returning
+    inline errors. The write + any carry-in recompute run post-ack."""
+    if not is_admin(body["user"]["id"], admin_ids):
+        ack()
+        return
+    _, _, errors = _parse_leave_limits(view, db)
     if errors:
         ack(response_action="errors", errors=errors)
+    else:
+        ack(response_action="clear")  # close the whole modal stack on success
+
+
+def submit_leave_limits_apply(body, view, db, client, admin_ids, today=None):
+    """Post-ack work: write the new allowances + consecutive limit, preserving the
+    carry-over caps. The base vacation allowance feeds carry_in, so when it changes we
+    rebuild every employee's stored carry_in (issue #8) — skipped otherwise. Re-checks
+    admin + validity because Lambda lazy listeners fire regardless of the ack result."""
+    today = today or date.today()
+    if not is_admin(body["user"]["id"], admin_ids):
         return
-    ack(response_action="clear")  # close the whole modal stack on success
+    parsed, consecutive, errors = _parse_leave_limits(view, db)
+    if errors:
+        return
+    policy = get_policy(db)
+    vacation_changed = parsed["vacation"] != policy["allowances"]["vacation"]
     set_policy(
         db,
         allowances={
@@ -204,13 +223,21 @@ def submit_leave_limits(ack, body, view, client, db, admin_ids):
         max_total=policy["max_total"],
         consecutive_limit={"vacation": consecutive},
     )
-    _notify(
-        client,
-        body["user"]["id"],
+    msg = (
         f"✅ Leave limits updated — sick {parsed['sick']}, vacation {parsed['vacation']}, "
         f"personal {parsed['personal']}, consecutive limit "
-        f"{consecutive if consecutive is not None else 'off'}.",
+        f"{consecutive if consecutive is not None else 'off'}."
     )
+    if vacation_changed:
+        count = recompute_all_carry_in(db, today.year)
+        msg += f" Carry-in recomputed for {count} employee(s)."
+    _notify(client, body["user"]["id"], msg)
+
+
+def submit_leave_limits(ack, body, view, client, db, admin_ids, today=None):
+    """Synchronous submit (Socket Mode / tests): validate-and-ack, then apply."""
+    submit_leave_limits_ack(ack, body, view, db, admin_ids)
+    submit_leave_limits_apply(body, view, db, client, admin_ids, today)
 
 
 # Block_ids of the carry-over modal (also the keys of the parsed values).

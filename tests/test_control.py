@@ -446,6 +446,56 @@ def test_leave_limits_vacation_allowance_capped_by_max_total(db):
     assert get_policy(db)["allowances"]["vacation"] == 10  # nothing written
 
 
+def test_leave_limits_vacation_change_recomputes_carry_in(db):
+    # carry_in is fed by the base vacation allowance, so changing it must rebuild
+    # stored carry_in (issue #8) — like the carry-over modal already does.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 20},
+        max_total={"vacation": 40},
+    )
+    _seed_carry_2027(db, "U_A")
+    before = get_employee(db, "U_A")["carry_in"]["2027"]
+    submit_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(30, 30, 5, 15),  # vacation 10 -> 30
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    after = get_employee(db, "U_A")["carry_in"]["2027"]
+    assert before == 10 and after == 20  # recomputed under the new allowance
+
+
+def test_leave_limits_non_vacation_change_skips_recompute(db):
+    # Changing only sick/personal/consecutive must not disturb stored carry_in.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        max_carry_over={"vacation": 20},
+        max_total={"vacation": 40},
+    )
+    _seed_carry_2027(db, "U_A")
+    db.employees.update_item(  # tamper so a recompute would visibly change it
+        Key={"slack_user_id": "U_A"},
+        UpdateExpression="SET carry_in = :c",
+        ExpressionAttributeValues={":c": {"2027": 99}},
+    )
+    submit_leave_limits(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_leave_limits_view(28, 10, 7, 15),  # vacation unchanged at 10
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2027, 6, 1),
+    )
+    assert get_employee(db, "U_A")["carry_in"]["2027"] == 99  # untouched
+
+
 def test_leave_limits_non_admin_submit_rejected(db):
     set_policy(db, allowances={"sick": 30, "vacation": 10, "personal": 5})
     ack = FakeAck()

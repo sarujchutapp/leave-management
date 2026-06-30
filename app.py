@@ -88,6 +88,8 @@ from leave.handlers import (
     submit_leave_ack,
     submit_leave_apply,
     submit_leave_limits,
+    submit_leave_limits_ack,
+    submit_leave_limits_apply,
     submit_manage_employees,
     submit_manage_employees_ack,
     submit_manage_employees_apply,
@@ -204,13 +206,6 @@ def build_app(calendar=None, faas=False):
     def _consecutive_toggle(ack, body, client):
         with db.connect() as d:
             update_leave_limits_modal(ack, body, client, d, admin_ids)
-
-    # Leave-limits submit is validate + a single PutItem (fast, well under 3s), so
-    # it runs synchronously in both run modes rather than as a lazy listener.
-    @app.view(LEAVE_LIMITS_CALLBACK_ID)
-    def _leave_limits_submit(ack, body, view, client):
-        with db.connect() as d:
-            submit_leave_limits(ack, body, view, client, d, admin_ids)
 
     @app.action(CARRY_OVER_ACTION)
     def _carry_over(ack, body, client):
@@ -349,6 +344,19 @@ def build_app(calendar=None, faas=False):
 
         app.view(MANAGE_EMPLOYEES_CALLBACK_ID)(ack=_manage_ack, lazy=[_manage_lazy])
 
+        # Leave-limits submit: validate + close in the ack phase, then write the policy
+        # post-ack. A vacation-allowance change rebuilds every employee's carry_in (a
+        # Scan), so the write runs lazily to keep the ack under 3s.
+        def _leave_limits_ack(ack, body, view):
+            with db.connect() as d:
+                submit_leave_limits_ack(ack, body, view, d, admin_ids)
+
+        def _leave_limits_lazy(body, view, client):
+            with db.connect() as d:
+                submit_leave_limits_apply(body, view, d, client, admin_ids)
+
+        app.view(LEAVE_LIMITS_CALLBACK_ID)(ack=_leave_limits_ack, lazy=[_leave_limits_lazy])
+
         # Group-break submit: the ack rejects a bot pick (inline error) or closes the
         # picker, then the multi-person search + DM run post-ack so the ack stays
         # under 3s for larger groups. The lazy apply re-checks bots (it fires
@@ -431,6 +439,11 @@ def build_app(calendar=None, faas=False):
                 submit_manage_employees(
                     ack, body, view, client, d, admin_ids, get_calendar(), get_sheets()
                 )
+
+        @app.view(LEAVE_LIMITS_CALLBACK_ID)
+        def _leave_limits_submit(ack, body, view, client):
+            with db.connect() as d:
+                submit_leave_limits(ack, body, view, client, d, admin_ids)
 
         @app.view(CANCEL_CALLBACK_ID)
         def _cancel(ack, body, view, client):
