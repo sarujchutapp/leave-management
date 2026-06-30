@@ -145,8 +145,12 @@ def _manage_view(employee, action="save", name=None, manager=None, overrides=Non
 
 
 def _menu_action_ids(view):
-    actions = next(b for b in view["blocks"] if b["type"] == "actions")
-    return {e["action_id"] for e in actions["elements"]}
+    return {
+        e["action_id"]
+        for b in view["blocks"]
+        if b["type"] == "actions"
+        for e in b["elements"]
+    }
 
 
 def test_is_admin_recognises_allowlist_members():
@@ -187,6 +191,20 @@ def test_admin_control_opens_menu_listing_actions():
     assert VIEW_SETTINGS_ACTION in action_ids
     assert LEAVE_LIMITS_ACTION in action_ids
     assert REPORT_ACTION in action_ids
+
+
+def test_control_menu_splits_buttons_to_avoid_overflow(db):
+    # Slack collapses >5 buttons in one actions block into a "…" overflow, hiding some.
+    # Spread them across actions blocks (<=5 each) so every action shows inline.
+    client = FakeSlackClient()
+    ack = FakeAck()
+    open_control_menu(
+        ack=ack, body={"user_id": "U_ADMIN", "trigger_id": "T"}, client=client, admin_ids=ADMINS
+    )
+    view = client.views_open_calls[0]["view"]
+    action_blocks = [b for b in view["blocks"] if b["type"] == "actions"]
+    assert action_blocks and all(len(b["elements"]) <= 5 for b in action_blocks)
+    assert len(_menu_action_ids(view)) == 7  # all admin actions present, none collapsed
 
 
 def test_view_settings_renders_current_policy(db):

@@ -671,32 +671,39 @@ def build_holidays_modal(holidays, action="add"):
     }
 
 
+# Slack shows the first 5 buttons in an actions block and collapses the rest into a
+# "…" overflow, so the buttons are spread across actions blocks of at most this many.
+_MENU_ROW = 4
+
+
 def build_control_menu():
-    """The /control admin menu: a button per admin action. No submit — each button
-    is a block action that opens its own sub-modal."""
-    return {
-        "type": "modal",
-        "callback_id": CONTROL_MENU_CALLBACK_ID,
-        "title": {"type": "plain_text", "text": "Admin Control"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "Pick an admin action:"},
-            },
+    """The /control admin menu: a button per admin action. No submit — each button is a
+    block action that opens its own sub-modal. Buttons are chunked across actions blocks
+    so none are hidden behind Slack's overflow (see _MENU_ROW)."""
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Pick an admin action:"}},
+    ]
+    for i in range(0, len(_CONTROL_BUTTONS), _MENU_ROW):
+        blocks.append(
             {
                 "type": "actions",
-                "block_id": "control_actions",
+                "block_id": f"control_actions_{i // _MENU_ROW}",
                 "elements": [
                     {
                         "type": "button",
                         "action_id": action_id,
                         "text": {"type": "plain_text", "text": label},
                     }
-                    for action_id, label in _CONTROL_BUTTONS
+                    for action_id, label in _CONTROL_BUTTONS[i : i + _MENU_ROW]
                 ],
-            },
-        ],
+            }
+        )
+    return {
+        "type": "modal",
+        "callback_id": CONTROL_MENU_CALLBACK_ID,
+        "title": {"type": "plain_text", "text": "Admin Control"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": blocks,
     }
 
 
