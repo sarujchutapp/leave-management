@@ -241,9 +241,6 @@ def submit_leave_limits(ack, body, view, client, db, admin_ids, today=None):
     submit_leave_limits_apply(body, view, db, client, admin_ids, today)
 
 
-# Block_ids of the carry-over modal (also the keys of the parsed values).
-_CARRY_FIELDS = ("max_carry_over", "max_total")
-
 
 def open_carry_over(ack, body, client, db, admin_ids):
     """Carry-over button: re-checks admin, then pushes the modal pre-filled with the
