@@ -67,6 +67,7 @@ from leave.handlers import (
     open_leave_limits,
     open_leave_modal,
     open_manage_employees,
+    prefill_manage_employee,
     update_manage_modal,
     update_carry_over_modal,
     update_leave_limits_modal,
@@ -242,6 +243,13 @@ def build_app(calendar=None, faas=False):
     @app.action(MANAGE_ACTION_SELECT)
     def _manage_action_changed(ack, body, client):
         update_manage_modal(ack, body, client, admin_ids)
+
+    # Employee picked in Manage Employees: re-render with their current values
+    # prefilled (constrained to that block so it doesn't catch other "value" pickers).
+    @app.action({"action_id": "value", "block_id": "employee"})
+    def _manage_employee_picked(ack, body, client):
+        with db.connect() as d:
+            prefill_manage_employee(ack, body, client, d, admin_ids)
 
     @app.action(REPORT_ACTION)
     def _report(ack, body, client):

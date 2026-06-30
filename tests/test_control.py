@@ -41,6 +41,7 @@ from leave.handlers import (
     submit_leave_limits,
     submit_manage_employees,
     submit_report,
+    prefill_manage_employee,
     update_holidays_modal,
     update_manage_modal,
     update_report_modal,
@@ -59,7 +60,7 @@ from leave.requests import (
     set_calendar_event_id,
     set_ticket_ref,
 )
-from leave.seed import upsert_employee
+from leave.seed import set_allowance_override, upsert_employee
 from tests.fakes import FakeAck, FakeCalendar, FakeSheets, FakeSlackClient
 
 ADMINS = {"U_ADMIN"}
@@ -1168,6 +1169,47 @@ def test_manage_modal_action_toggles_fields(db):
     ids2 = _manage_block_ids(client.views_update_calls[1]["view"])
     assert {"employee", "action"} <= ids2
     assert not ({"name", "manager", "override_sick"} & ids2)
+
+
+def _pick_body(selected_user, action="save"):
+    return {
+        "user": {"id": "U_ADMIN"},
+        "view": {"id": "V1", "state": {"values": {
+            "action": {MANAGE_ACTION_SELECT: {"selected_option": {"value": action}}}}}},
+        "actions": [{"selected_user": selected_user}],
+    }
+
+
+def test_manage_employee_pick_prefills_current_values(db):
+    # Picking a registered employee re-renders the modal with their current name,
+    # manager, and selection filled in (so "edit" shows what you're editing).
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    client = FakeSlackClient()
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_E"), client=client, db=db, admin_ids=ADMINS)
+    view = client.views_update_calls[0]["view"]
+    blocks = {b.get("block_id"): b for b in view["blocks"]}
+    assert blocks["name"]["element"].get("initial_value") == "Eve"
+    assert blocks["manager"]["element"].get("initial_user") == "U_MGR"
+    assert blocks["employee"]["element"].get("initial_user") == "U_E"  # selection kept
+
+
+def test_manage_employee_pick_unregistered_is_blank(db):
+    client = FakeSlackClient()
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_NEW"), client=client, db=db, admin_ids=ADMINS)
+    blocks = {b.get("block_id"): b for b in client.views_update_calls[0]["view"]["blocks"]}
+    assert "initial_value" not in blocks["name"]["element"]  # fresh add → blank
+    assert blocks["employee"]["element"].get("initial_user") == "U_NEW"  # but selection kept
+
+
+def test_manage_employee_pick_prefills_override(db):
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    set_allowance_override(db, "U_E", {"vacation": 15})
+    client = FakeSlackClient()
+    prefill_manage_employee(
+        ack=FakeAck(), body=_pick_body("U_E", action="override"), client=client, db=db, admin_ids=ADMINS
+    )
+    blocks = {b.get("block_id"): b for b in client.views_update_calls[0]["view"]["blocks"]}
+    assert blocks["override_vacation"]["element"].get("initial_value") == "15"
 
 
 def test_manage_add_creates_employee(db):

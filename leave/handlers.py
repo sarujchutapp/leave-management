@@ -610,12 +610,33 @@ def open_manage_employees(ack, body, client, admin_ids):
 
 def update_manage_modal(ack, body, client, admin_ids):
     """Action select changed: re-render the modal in place so only the chosen action's
-    fields show (Add/edit → name + manager, Set override → allowances, Delete → none)."""
+    fields show (Add/edit → name + manager, Set override → allowances, Delete → none).
+    Keeps the picked employee selected so their prefill survives the switch."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     action = body["actions"][0]["selected_option"]["value"]
-    client.views_update(view_id=body["view"]["id"], view=build_manage_employees_modal(action))
+    values = body.get("view", {}).get("state", {}).get("values", {})
+    selected = _value(values, "employee").get("selected_user")
+    client.views_update(
+        view_id=body["view"]["id"], view=build_manage_employees_modal(action, selected_user=selected)
+    )
+
+
+def prefill_manage_employee(ack, body, client, db, admin_ids):
+    """Employee picked: re-render the modal with that registered employee's current
+    name/manager/override prefilled (blank for someone not yet in the system), keeping
+    them selected. Turns "Add / edit" into real editing and a way to view current values."""
+    ack()
+    if not is_admin(body["user"]["id"], admin_ids):
+        return
+    selected = body["actions"][0].get("selected_user")
+    action = _manage_action(body["view"]["state"]["values"])
+    employee = get_employee(db, selected) if selected else None
+    client.views_update(
+        view_id=body["view"]["id"],
+        view=build_manage_employees_modal(action, selected_user=selected, employee=employee),
+    )
 
 
 def _value(values, block_id):

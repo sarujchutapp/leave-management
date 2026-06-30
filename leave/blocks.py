@@ -808,13 +808,16 @@ def _optional_user_select(block_id, label, placeholder):
     }
 
 
-def _optional_text(block_id, label):
+def _optional_text(block_id, label, initial=None):
+    element = {"type": "plain_text_input", "action_id": "value"}
+    if initial is not None:
+        element["initial_value"] = str(initial)
     return {
         "type": "input",
         "block_id": block_id,
         "optional": True,
         "label": {"type": "plain_text", "text": label},
-        "element": {"type": "plain_text_input", "action_id": "value"},
+        "element": element,
     }
 
 
@@ -825,23 +828,30 @@ _MANAGE_ACTIONS = [
 ]
 
 
-def build_manage_employees_modal(action="save"):
+def build_manage_employees_modal(action="save", selected_user=None, employee=None):
     """Add/edit, set an allowance override, or delete an employee. The Action select
-    dispatches a block action so the modal shows only the fields the chosen action
-    needs (re-rendered via views_update). Employee + Manager are Slack user-pickers,
-    so member IDs are supplied directly. Delete is block-and-tell: a person who still
-    manages anyone is rejected until reassigned."""
+    and the Employee picker both dispatch a block action so the modal re-renders —
+    the Action select shows only the fields that action needs, and picking an Employee
+    prefills their current name/manager/override (blank for someone not yet in the
+    system). Employee + Manager are Slack user-pickers, so member IDs are supplied
+    directly. Delete is block-and-tell: a person who still manages anyone is rejected
+    until reassigned. `employee` is the picked person's stored record (or None)."""
     initial = next((o for o in _MANAGE_ACTIONS if o["value"] == action), _MANAGE_ACTIONS[0])
+    overrides = (employee or {}).get("allowances") or {}
+    employee_element = {
+        "type": "users_select",
+        "action_id": "value",
+        "placeholder": {"type": "plain_text", "text": "Pick a person"},
+    }
+    if selected_user:
+        employee_element["initial_user"] = selected_user
     blocks = [
         {
             "type": "input",
             "block_id": "employee",
+            "dispatch_action": True,  # re-render with the picked person's values prefilled
             "label": {"type": "plain_text", "text": "Employee"},
-            "element": {
-                "type": "users_select",
-                "action_id": "value",
-                "placeholder": {"type": "plain_text", "text": "Pick a person"},
-            },
+            "element": employee_element,
         },
         {
             "type": "input",
@@ -858,12 +868,22 @@ def build_manage_employees_modal(action="save"):
     ]
 
     if action == "save":
+        name_element = {"type": "plain_text_input", "action_id": "value"}
+        if employee and employee.get("real_name"):
+            name_element["initial_value"] = employee["real_name"]
+        manager_element = {
+            "type": "users_select",
+            "action_id": "value",
+            "placeholder": {"type": "plain_text", "text": "Pick the approver"},
+        }
+        if employee and employee.get("manager_id"):
+            manager_element["initial_user"] = employee["manager_id"]
         blocks += [
             {
                 "type": "input",
                 "block_id": "name",
                 "label": {"type": "plain_text", "text": "Name"},
-                "element": {"type": "plain_text_input", "action_id": "value"},
+                "element": name_element,
             },
             {
                 "type": "input",
@@ -874,11 +894,7 @@ def build_manage_employees_modal(action="save"):
                     "text": "The approver. Pick the person themselves if they're top of chain "
                     "(their leave auto-approves).",
                 },
-                "element": {
-                    "type": "users_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick the approver"},
-                },
+                "element": manager_element,
             },
         ]
     elif action == "override":
@@ -895,9 +911,9 @@ def build_manage_employees_modal(action="save"):
             }
         )
         blocks += [
-            _optional_text("override_sick", "Sick override"),
-            _optional_text("override_vacation", "Vacation override"),
-            _optional_text("override_personal", "Personal override"),
+            _optional_text("override_sick", "Sick override", overrides.get("sick")),
+            _optional_text("override_vacation", "Vacation override", overrides.get("vacation")),
+            _optional_text("override_personal", "Personal override", overrides.get("personal")),
         ]
     else:  # delete
         blocks.append(
