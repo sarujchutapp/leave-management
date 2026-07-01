@@ -542,15 +542,23 @@ def build_decision_notice(employee_name, leave_type, start, end, decision, reaso
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
-def build_cancel_modal(rows):
+def build_cancel_modal(rows, today):
     """Modal listing the cancellable requests in a dropdown. Uses static_select
     (max 100 options) rather than radio_buttons (capped at 10) so a long backlog
-    of upcoming/pending requests doesn't blow the limit and fail to open."""
+    of upcoming/pending requests doesn't blow the limit and fail to open. An
+    in-progress approved leave (start ≤ today ≤ end) is marked `(in progress)` — it
+    cancels as an early return rather than a full cancel."""
+
+    def marker(r):
+        if r["status"] == "approved" and r["start_date"] <= today <= r["end_date"]:
+            return "in progress"
+        return r["status"]
+
     options = [
         {
             "text": {
                 "type": "plain_text",
-                "text": f"{r['leave_type']} · {format_period(r['start_date'], r['end_date'], r.get('half'))} ({r['status']})"[:75],
+                "text": f"{r['leave_type']} · {format_period(r['start_date'], r['end_date'], r.get('half'))} ({marker(r)})"[:75],
             },
             "value": str(r["request_id"]),
         }
