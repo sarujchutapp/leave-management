@@ -70,6 +70,7 @@ from leave.requests import (
     early_return_reclaim_days,
     get_request,
     half_day_dates,
+    is_early_returnable,
     is_in_progress,
     pending_days,
     recompute_all_carry_in,
@@ -1488,12 +1489,21 @@ def _early_return(db, calendar, client, sheets, request, today):
     """Cancel an in-progress leave as an early return: shorten it to end today (it
     stays approved — days through today stay taken; the tail refunds via the derived
     balance), re-date its calendar event to [start, today], update the board entry,
-    then DM the employee and FYI a distinct manager."""
+    then DM the employee and FYI a distinct manager.
+
+    Guarded twice: a leave with nothing to give back (ends today, tail all
+    weekend/holiday, or a half-day) isn't returnable, and the shorten itself is a
+    conditional write — so a racing cancel or a double-submit reports it didn't apply
+    and fires no duplicate side effects."""
+    if not is_early_returnable(db, request, today):
+        _notify(client, request["employee_id"], CANNOT_CANCEL)
+        return
     reclaimed = early_return_reclaim_days(db, request, today)
+    if not early_return(db, request["request_id"], today):
+        _notify(client, request["employee_id"], CANNOT_CANCEL)
+        return
     employee = get_employee(db, request["employee_id"])
     leave_type, start = request["leave_type"], request["start_date"]
-
-    early_return(db, request["request_id"], today)
 
     if request["calendar_event_id"]:
         # The calendar client can only patch a title, so re-date by delete + recreate.

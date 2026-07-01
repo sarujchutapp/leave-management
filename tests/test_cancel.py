@@ -11,12 +11,14 @@ from leave.handlers import (
 from leave.requests import (
     approve_request,
     can_cancel,
+    cancel_request,
     cancellable_requests,
     create_request,
     decline_request,
     early_return,
     early_return_reclaim_days,
     get_request,
+    is_early_returnable,
     is_in_progress,
     remaining_balance,
     set_calendar_event_id,
@@ -106,6 +108,53 @@ def test_early_return_shortens_end_and_refunds_tail(db):
     assert r["end_date"] == TODAY
     assert r["status"] == "approved"  # still approved; days through today stay taken
     assert remaining_balance(db, alice, "vacation", TODAY) == before + 4  # tail refunded
+
+
+# --- early-return guards & atomicity: requests.py seam (#54) ---------------
+
+def test_early_return_conditional_applies_once(db):
+    _people(db)
+    rid = _approved_in_progress(db)
+    assert early_return(db, rid, TODAY) is True  # first shortens
+    assert early_return(db, rid, TODAY) is False  # already at today — a double-submit no-ops
+    assert get_request(db, rid)["end_date"] == TODAY
+
+
+def test_early_return_skipped_when_no_longer_approved(db):
+    _people(db)
+    rid = _approved_in_progress(db)
+    cancel_request(db, rid)  # a racing cancel wins first
+    assert early_return(db, rid, TODAY) is False
+    assert get_request(db, rid)["end_date"] == INPROGRESS_END  # end unchanged
+
+
+def test_leave_ending_today_not_early_returnable(db):
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", INPROGRESS_START, TODAY, None)
+    approve_request(db, rid)
+    r = get_request(db, rid)
+    assert is_early_returnable(db, r, TODAY) is False  # nothing after today to return
+    assert rid not in {x["request_id"] for x in cancellable_requests(db, "U_ALICE", TODAY)}
+
+
+def test_remaining_all_weekend_not_early_returnable(db):
+    _people(db)
+    friday = date(2026, 6, 12)  # tail Sat–Sun has no working days
+    rid = create_request(db, "U_ALICE", "vacation", date(2026, 6, 10), date(2026, 6, 14), None)
+    approve_request(db, rid)
+    r = get_request(db, rid)
+    assert early_return_reclaim_days(db, r, friday) == 0
+    assert is_early_returnable(db, r, friday) is False
+    assert rid not in {x["request_id"] for x in cancellable_requests(db, "U_ALICE", friday)}
+
+
+def test_half_day_never_early_returnable(db):
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", TODAY, TODAY, None, half="morning")
+    approve_request(db, rid)
+    r = get_request(db, rid)
+    assert is_early_returnable(db, r, TODAY) is False
+    assert rid not in {x["request_id"] for x in cancellable_requests(db, "U_ALICE", TODAY)}
 
 
 # --- build_cancel_modal seam ----------------------------------------------
@@ -254,6 +303,19 @@ def test_early_return_fyis_distinct_manager(db):
     fyi = [c for c in client.chat_postMessage_calls if c["channel"] == "U_BOSS"]
     assert len(fyi) == 1
     assert "early" in fyi[0]["text"].lower()
+
+
+def test_early_return_second_submit_fires_no_duplicate_side_effects(db):
+    _people(db)
+    rid = _approved_in_progress(db)
+    _cancel(db, rid, "U_ALICE")  # first submit applies the early return
+
+    client2, cal2 = FakeSlackClient(), FakeCalendar()
+    _cancel(db, rid, "U_ALICE", calendar=cal2, client=client2)  # stale/racing re-submit
+
+    assert cal2.deleted == [] and cal2.created == []  # no second calendar re-date
+    assert get_request(db, rid)["end_date"] == TODAY  # unchanged
+    assert client2.chat_postMessage_calls[0]["text"] == CANNOT_CANCEL  # reports it didn't apply
 
 
 def test_early_return_no_fyi_for_self_approver(db):
