@@ -66,8 +66,11 @@ from leave.requests import (
     clear_all_requests,
     create_request,
     decline_request,
+    early_return,
+    early_return_reclaim_days,
     get_request,
     half_day_dates,
+    is_in_progress,
     pending_days,
     recompute_all_carry_in,
     remaining_balance,
@@ -746,7 +749,7 @@ def _settle_in_flight_leave(
             cancel_request(db, request["request_id"])
             pending += 1
             _withdraw_ticket(client, request, withdraw_text)
-        elif include_approved:  # future-approved: drop its calendar event and board entry
+        elif include_approved and request["start_date"] > today:  # future-approved only: drop its calendar event and board entry
             cancel_request(db, request["request_id"])
             if request["calendar_event_id"]:
                 calendar.delete_event(request["calendar_event_id"])
@@ -1478,7 +1481,59 @@ def open_cancel_modal(ack, body, client, db, today=None):
         ack(NOTHING_TO_CANCEL)
         return
     ack()
-    client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows))
+    client.views_open(trigger_id=body["trigger_id"], view=build_cancel_modal(rows, today))
+
+
+def _early_return(db, calendar, client, sheets, request, today):
+    """Cancel an in-progress leave as an early return: shorten it to end today (it
+    stays approved — days through today stay taken; the tail refunds via the derived
+    balance), re-date its calendar event to [start, today], update the board entry,
+    then DM the employee and FYI a distinct manager."""
+    reclaimed = early_return_reclaim_days(db, request, today)
+    employee = get_employee(db, request["employee_id"])
+    leave_type, start = request["leave_type"], request["start_date"]
+
+    early_return(db, request["request_id"], today)
+
+    if request["calendar_event_id"]:
+        # The calendar client can only patch a title, so re-date by delete + recreate.
+        calendar.delete_event(request["calendar_event_id"])
+        event_id = calendar.create_event(
+            f"{employee['real_name']} — {leave_type}",
+            start,
+            today,
+            color_id_for(employee["slack_user_id"]),
+        )
+        set_calendar_event_id(db, request["request_id"], event_id)
+
+    update_board(
+        db,
+        client,
+        today,
+        sheets,
+        add={
+            "request_id": request["request_id"],
+            "name": employee["real_name"],
+            "type": leave_type,
+            "start": start,
+            "end": today,
+            "half": None,
+        },
+    )
+
+    if not _self_approves(employee):  # only FYI a real, distinct manager
+        _notify(
+            client,
+            employee["manager_id"],
+            f"FYI: {employee['real_name']} returned early from their {leave_type} leave — "
+            f"now {format_period(start, today)} ({reclaimed} day(s) returned).",
+        )
+    _notify(
+        client,
+        employee["slack_user_id"],
+        f"Your {leave_type} leave ended early — kept through {today.isoformat()}, "
+        f"{reclaimed} day(s) returned to your balance.",
+    )
 
 
 def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None):
@@ -1496,6 +1551,10 @@ def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None
         return
     if not can_cancel(request, today):
         _notify(client, body["user"]["id"], CANNOT_CANCEL)
+        return
+
+    if is_in_progress(request, today):
+        _early_return(db, calendar, client, sheets, request, today)
         return
 
     status_before = request["status"]

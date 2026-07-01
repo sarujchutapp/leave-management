@@ -360,23 +360,57 @@ def set_ticket_ref(db, request_id, channel, ts):
 
 
 def cancellable_requests(db, employee_id, today):
-    """The employee's requests that can still be cancelled: any pending one, or
-    an approved one that hasn't started yet. Ordered by start date."""
+    """The employee's requests the cancel flow can act on: any pending one, or an
+    approved one that hasn't ended yet — future (a full cancel) or in progress (an
+    early return). Ordered by start date."""
     requests = [_deserialize(r) for r in _by_employee(db, employee_id)]
     cancellable = [
         r
         for r in requests
         if r["status"] == "pending"
-        or (r["status"] == "approved" and r["start_date"] > today)
+        or (r["status"] == "approved" and r["end_date"] >= today)
     ]
     cancellable.sort(key=lambda r: r["start_date"])
     return cancellable
 
 
 def can_cancel(request, today):
+    """Actionable in the cancel flow: pending, or an approved leave not yet ended
+    (future → full cancel, in progress → early return)."""
     if request["status"] == "pending":
         return True
-    return request["status"] == "approved" and request["start_date"] > today
+    return request["status"] == "approved" and request["end_date"] >= today
+
+
+def is_in_progress(request, today):
+    """An approved leave currently underway (start ≤ today ≤ end). Cancelling one is
+    an early return — it's shortened to end today rather than fully cancelled."""
+    return (
+        request["status"] == "approved"
+        and request["start_date"] <= today <= request["end_date"]
+    )
+
+
+def early_return_reclaim_days(db, request, today):
+    """Working days after today that an early return gives back — the tail
+    (today, end]. Zero when the leave already ends today or the remaining days are
+    all weekend/holiday."""
+    tail_start = today + timedelta(days=1)
+    if tail_start > request["end_date"]:
+        return 0
+    holidays = holidays_between(db, tail_start, request["end_date"])
+    return request_days(tail_start, request["end_date"], None, holidays)
+
+
+def early_return(db, request_id, today):
+    """Shorten an in-progress leave to end today. It stays approved: days through
+    today remain consumed, and the tail refunds automatically through the derived
+    balance (no stored-balance write, no carry-in recompute)."""
+    db.requests.update_item(
+        Key={"request_id": request_id},
+        UpdateExpression="SET end_date = :e, updated_at = :u",
+        ExpressionAttributeValues={":e": today.isoformat(), ":u": _now_iso()},
+    )
 
 
 def cancel_request(db, request_id):
