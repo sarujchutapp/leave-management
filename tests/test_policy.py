@@ -49,3 +49,16 @@ def test_get_policy_falls_back_to_defaults_when_unseeded(db):
     p = get_policy(db)
     assert p["allowances"]["vacation"] == 10
     assert p["consecutive_limit"]["vacation"] == 15
+
+
+def test_reset_date_defaults_to_jan1(db):
+    p = get_policy(db)
+    assert (p["reset_month"], p["reset_day"]) == (1, 1)
+
+
+def test_set_policy_preserves_reset_date_when_editing_caps(db):
+    set_policy(db, reset_month=4, reset_day=13)
+    # A later caps edit that omits the reset date must not move it back to 1 Jan.
+    set_policy(db, max_carry_over={"vacation": 7}, max_total={"vacation": 18})
+    p = get_policy(db)
+    assert (p["reset_month"], p["reset_day"]) == (4, 13)

@@ -59,3 +59,35 @@ policy directly.
 ## Blocked by
 
 None - can start immediately
+
+---
+
+## Done (tracer bullet)
+
+- New pure seam `leave/leave_year.py`: `next_reset` / `last_reset` / `leave_period`
+  (`[last reset, next reset)`), `reset_transition` (stub/stretch/unchanged), `period_key`
+  (byte-compatible `"YYYY"` at 1-Jan, ISO otherwise), `reset_date` (29-Feb clamp).
+- Central policy gains `reset_month` / `reset_day` (default 1/1). `set_policy` **preserves**
+  the reset date when omitted, so caps/limits edits never silently move the leave year.
+- Balance layer (`leave/requests.py`) reads its window from the seam: `approved_weekdays`,
+  `remaining_balance(s)`, `pending_days`, and `carry_in_for` now compute over the current
+  leave period. `carry_in` is keyed per reset period and advances period-by-period. Holiday
+  windows use `holidays_between` over the period (may span two calendar years).
+- ADR-0004 updated: leave year is a configurable, forward-only boundary.
+- Tests: `tests/test_leave_year.py` (seam) + 3 non-1-Jan cases in `tests/test_carryover.py`
+  + reset-date defaults/preservation in `tests/test_policy.py`. Full suite green (330).
+
+**Scope decision / note for #57 & #58:** I did **not** add a separate company-wide
+`reset_anchor` field on the policy. The "forward-advancing anchor" is realized by the
+per-employee period-keyed `carry_in` map (the advance fires when today enters a period not
+yet stored). The seam exposes `reset_transition` for #58's setter to compute the forward-only
+stub/stretch. If #58's forward-only transition needs to pin the *current* period's start
+across a mid-period reset-date change (so the stub keeps its original start), it will need a
+stored anchor/period-start then — confirm during #58.
+
+**Note for #57:** report/optimizer/burnout still read `today.year` (calendar year) — left
+deliberately for #57 to re-base onto `leave/leave_year.leave_period`.
+
+**Test runner:** repo has no `npm`/type-checker; the Linux `.venv` has broken symlinks under
+Windows git-bash. Ran the suite with system Python that has the deps:
+`python -m pytest` (all 330 pass).

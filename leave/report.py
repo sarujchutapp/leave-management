@@ -69,7 +69,7 @@ def build_report_csv(db, today):
     for emp in sorted(_all_employees(db), key=lambda e: e.get("real_name", "")):
         balances = remaining_balances(db, emp, today)
         used = approved_weekdays_by_type_this_year(db, emp["slack_user_id"], today)
-        carry = carry_in_for(db, emp, today.year)
+        carry = carry_in_for(db, emp, today)
         for leave_type in LEAVE_TYPES:
             if leave_type not in balances:
                 continue
