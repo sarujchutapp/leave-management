@@ -13,6 +13,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from leave.balance import request_days
 from leave.board import BOARD_KEY, reset_board
@@ -360,15 +361,17 @@ def set_ticket_ref(db, request_id, channel, ts):
 
 
 def cancellable_requests(db, employee_id, today):
-    """The employee's requests the cancel flow can act on: any pending one, or an
-    approved one that hasn't ended yet — future (a full cancel) or in progress (an
-    early return). Ordered by start date."""
+    """The employee's requests the cancel flow can act on: any pending one, an approved
+    one that hasn't started yet (a full cancel), or an in-progress one that can still
+    be returned early (full-day with working days left to give back). Ordered by start
+    date."""
     requests = [_deserialize(r) for r in _by_employee(db, employee_id)]
     cancellable = [
         r
         for r in requests
         if r["status"] == "pending"
-        or (r["status"] == "approved" and r["end_date"] >= today)
+        or (r["status"] == "approved" and r["start_date"] > today)
+        or is_early_returnable(db, r, today)
     ]
     cancellable.sort(key=lambda r: r["start_date"])
     return cancellable
@@ -402,15 +405,44 @@ def early_return_reclaim_days(db, request, today):
     return request_days(tail_start, request["end_date"], None, holidays)
 
 
+def is_early_returnable(db, request, today):
+    """Whether an in-progress leave can be returned early: it's a full-day leave with
+    working days left after today to give back. A half-day (always a single date) is
+    never an early return, and a leave that ends today or whose remaining days are all
+    weekend/holiday has nothing to return."""
+    return (
+        is_in_progress(request, today)
+        and not request.get("half")
+        and early_return_reclaim_days(db, request, today) > 0
+    )
+
+
 def early_return(db, request_id, today):
     """Shorten an in-progress leave to end today. It stays approved: days through
     today remain consumed, and the tail refunds automatically through the derived
-    balance (no stored-balance write, no carry-in recompute)."""
-    db.requests.update_item(
-        Key={"request_id": request_id},
-        UpdateExpression="SET end_date = :e, updated_at = :u",
-        ExpressionAttributeValues={":e": today.isoformat(), ":u": _now_iso()},
-    )
+    balance (no stored-balance write, no carry-in recompute).
+
+    Guarded like the other transitions: applies only while the request is still an
+    approved leave that extends past today, so a racing cancel or a double-submit
+    can't shorten it twice or double-fire its side effects. Returns True if it
+    applied, False if the guard failed."""
+    try:
+        db.requests.update_item(
+            Key={"request_id": request_id},
+            UpdateExpression="SET end_date = :e, updated_at = :u",
+            ConditionExpression="#s = :approved AND end_date > :e",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":e": today.isoformat(),
+                ":approved": "approved",
+                ":u": _now_iso(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
 
 
 def cancel_request(db, request_id):
