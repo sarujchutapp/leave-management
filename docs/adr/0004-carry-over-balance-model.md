@@ -73,13 +73,21 @@ DB, no clock. The balance and carry-in read their window from the seam instead o
 The model above is unchanged in spirit — minimal stored state, lazy self-triggering
 compute, nothing retroactive — with three refinements:
 
-- **Period-keyed carry.** `carry_in` is keyed per reset period, not per calendar year.
-  The 1-Jan default keys stay the bare year string (`"2026"`), byte-compatible with
-  existing data (no migration); any other reset date keys by the period's ISO start,
-  which stays unique even when a one-time stub puts two resets in one calendar year.
+- **Period-keyed carry.** `carry_in` is keyed per reset period by the period's **start
+  date**. A period starting 1 Jan keys to the bare year string (`"2026"`),
+  byte-compatible with existing data (no migration); any other start keys to its ISO
+  date, which stays unique even when a one-time stub puts two resets in one calendar
+  year. Keying by the start (not the current reset month/day) is what lets a
+  forward-only reset-date change keep the current period's key — its stored carry, and
+  thus the balance, doesn't shift.
 - **The advance self-triggers on the period, not 1 Jan.** The lazy carry-in compute
   fires the first time a balance is touched in a period not yet stored, rolling forward
   period by period; the concurrent-first-touch conditional write is unchanged.
-- **Forward-only.** Changing the reset date never recomputes or reclassifies a past
-  period — it only sets where the current period next ends (a shorter stub or longer
-  stretch). Consistent with "only the cross-year hand-off is frozen".
+- **Forward-only, via a stored pin.** Changing the reset date (admin, in `/control →
+  Carry-over`) never recomputes or reclassifies a past period — it only moves where the
+  current period next ends (a shorter stub or longer stretch). The change stores a pin
+  on the policy — `reset_anchor` (the new next reset) and `reset_period_start` (the
+  current period's held start) — which the seam rolls forward deterministically (no
+  write-on-read) and drops back to the plain recurrence once the anchor is crossed. The
+  one-time stub/stretch period is treated as a single unit by the carry roll-forward, so
+  it is never split on the recurrence.

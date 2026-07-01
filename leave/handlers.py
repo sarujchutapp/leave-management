@@ -55,7 +55,7 @@ from leave.holidays import (
     holidays_between,
     parse_holiday_text,
 )
-from leave.leave_year import leave_period
+from leave.leave_year import current_period, leave_period, reset_transition
 from leave.optimizer import Member, group_break, top_breaks
 from leave.requests import (
     active_full_leave_ranges,
@@ -254,22 +254,26 @@ def submit_leave_limits(ack, body, view, client, db, admin_ids, today=None):
 
 
 
-def open_carry_over(ack, body, client, db, admin_ids):
+def open_carry_over(ack, body, client, db, admin_ids, today=None):
     """Carry-over button: re-checks admin, then pushes the modal pre-filled with the
-    current vacation carry-over caps."""
+    current vacation carry-over caps and reset date."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
-    client.views_push(trigger_id=body["trigger_id"], view=build_carry_over_modal(get_policy(db)))
+    today = today or date.today()
+    client.views_push(
+        trigger_id=body["trigger_id"], view=build_carry_over_modal(get_policy(db), today)
+    )
 
 
-def update_carry_over_modal(ack, body, client, db, admin_ids):
+def update_carry_over_modal(ack, body, client, db, admin_ids, today=None):
     """Enable-carry-over checkbox toggled: re-render in place so the Max carry over field
     shows only when carry-over is on. Rebuilds from the stored policy (unsaved edits
     revert — rarely touched); enabling from off seeds the field with the shipped default."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
+    today = today or date.today()
     enabled = bool(body["actions"][0].get("selected_options"))
     policy = get_policy(db)
     current = policy["max_carry_over"]["vacation"]
@@ -278,7 +282,7 @@ def update_carry_over_modal(ack, body, client, db, admin_ids):
     else:
         value = 0
     policy = {**policy, "max_carry_over": {"vacation": value}}
-    client.views_update(view_id=body["view"]["id"], view=build_carry_over_modal(policy))
+    client.views_update(view_id=body["view"]["id"], view=build_carry_over_modal(policy, today))
 
 
 def _parse_carry_over(view, db):
@@ -287,6 +291,7 @@ def _parse_carry_over(view, db):
     else it is 0 (carry-over disabled — nothing rolls over). Enforces the invariants
     Max total >= vacation allowance and Max carry over <= Max total."""
     values = view["state"]["values"]
+    policy = get_policy(db)
     parsed, errors = {}, {}
     max_total, err = _parse_int(values["max_total"]["value"]["value"])
     if err:
@@ -301,7 +306,14 @@ def _parse_carry_over(view, db):
             parsed["max_carry_over"] = mco
     else:
         parsed["max_carry_over"] = 0
-    allowance = get_policy(db)["allowances"]["vacation"]
+    # Reset date (month/day; year ignored). Absent from older payloads -> keep current.
+    picked = values.get("reset_date", {}).get("value", {}).get("selected_date")
+    if picked:
+        d = date.fromisoformat(picked)
+        parsed["reset_month"], parsed["reset_day"] = d.month, d.day
+    else:
+        parsed["reset_month"], parsed["reset_day"] = policy["reset_month"], policy["reset_day"]
+    allowance = policy["allowances"]["vacation"]
     if "max_total" in parsed and parsed["max_total"] < allowance:
         errors["max_total"] = f"Max total can't be below the vacation allowance ({allowance})."
     elif "max_total" in parsed and "max_carry_over" in parsed and parsed["max_carry_over"] > parsed["max_total"]:
@@ -309,9 +321,41 @@ def _parse_carry_over(view, db):
     return parsed, errors
 
 
-def submit_carry_over_ack(ack, body, view, db, admin_ids):
-    """Ack phase (under 3s): re-check admin, validate, write the new caps. Returns
-    True when applied, so the caller knows to run the post-ack recompute."""
+def _reset_date_change(policy, parsed, today):
+    """The forward-only move to the submitted reset date. Returns `(set_policy kwargs,
+    admin note)` — empty kwargs and no note when the date is unchanged. The current
+    period keeps its start (pinned), so no past period is recomputed and balances don't
+    shift; only when it next resets moves — a shorter stub or a longer stretch."""
+    new_month, new_day = parsed["reset_month"], parsed["reset_day"]
+    cur_start, cur_end = current_period(
+        today,
+        policy["reset_month"],
+        policy["reset_day"],
+        policy["reset_anchor"],
+        policy["reset_period_start"],
+    )
+    new_anchor, kind = reset_transition(today, cur_end, new_month, new_day)
+    if kind == "unchanged":
+        return {}, None
+    kwargs = {
+        "reset_month": new_month,
+        "reset_day": new_day,
+        "reset_anchor": new_anchor,
+        "reset_period_start": cur_start,
+    }
+    shape = "shorter (a stub)" if kind == "stub" else "longer (a stretch)"
+    note = (
+        f"📅 Leave-year reset date updated. The current period is now {shape} — it ends "
+        f"{(new_anchor - timedelta(days=1)).isoformat()}, then quota resets. "
+        "Existing balances don't shift."
+    )
+    return kwargs, note
+
+
+def submit_carry_over_ack(ack, body, view, db, admin_ids, client=None, today=None):
+    """Ack phase (under 3s): re-check admin, validate, write the new caps, and apply any
+    forward-only reset-date change (store + admin note, no recompute). Returns True when
+    applied, so the caller knows to run the post-ack carry-in recompute for the caps."""
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return False
@@ -320,14 +364,19 @@ def submit_carry_over_ack(ack, body, view, db, admin_ids):
         ack(response_action="errors", errors=errors)
         return False
     ack(response_action="clear")  # close the whole modal stack on success
+    today = today or date.today()
     policy = get_policy(db)
+    reset_kwargs, note = _reset_date_change(policy, parsed, today)
     set_policy(
         db,
         allowances=policy["allowances"],
         max_carry_over={"vacation": parsed["max_carry_over"]},
         max_total={"vacation": parsed["max_total"]},
         consecutive_limit=policy["consecutive_limit"],
+        **reset_kwargs,
     )
+    if note and client is not None:
+        _notify(client, body["user"]["id"], note)
     return True
 
 
@@ -352,7 +401,7 @@ def submit_carry_over_apply(body, view, db, client, admin_ids, today=None):
 
 def submit_carry_over(ack, body, view, client, db, admin_ids, today=None):
     """Synchronous submit (Socket Mode / tests): ack-with-validation, then recompute."""
-    if submit_carry_over_ack(ack, body, view, db, admin_ids):
+    if submit_carry_over_ack(ack, body, view, db, admin_ids, client, today):
         submit_carry_over_apply(body, view, db, client, admin_ids, today)
 
 

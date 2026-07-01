@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 from leave.balance import request_days
 from leave.board import BOARD_KEY, reset_board
 from leave.holidays import HOLIDAYS_KEY, holidays_between
-from leave.leave_year import leave_period, next_reset, period_key, reset_date
+from leave.leave_year import current_period, next_reset, period_key, reset_date
 from leave.policy import POLICY_KEY, allowance_for, get_policy
 
 logger = logging.getLogger(__name__)
@@ -46,12 +46,24 @@ def _by_employee(db, employee_id):
     return resp["Items"]
 
 
+def _current_period(policy, today):
+    """The current leave period `(start, end)` (`end` exclusive) from the central reset
+    date, honouring a stored forward-only pin (`reset_anchor` / `reset_period_start`)."""
+    return current_period(
+        today,
+        policy["reset_month"],
+        policy["reset_day"],
+        policy.get("reset_anchor"),
+        policy.get("reset_period_start"),
+    )
+
+
 def _period_bounds(db, today, policy=None):
     """The current leave period `[start, last_day]` (both inclusive `date`s) from the
     central reset date, for querying the `by_employee` GSI. `last_day` is the day
     before the next reset, so the reset day itself opens the next period."""
     policy = policy or get_policy(db)
-    start, end = leave_period(today, policy["reset_month"], policy["reset_day"])
+    start, end = _current_period(policy, today)
     return start, end - timedelta(days=1)
 
 
@@ -95,13 +107,23 @@ def _persist_carry_in(db, employee, cmap):
     employee["carry_in"] = cmap
 
 
-def _stored_start(key, month, day):
-    """The period start a stored carry_in key names. A bare 4-digit year key is the
-    1-Jan default (byte-compatible with pre-reset-date data); anything else is an ISO
+def _stored_start(key):
+    """The period start a stored carry_in key names. A bare 4-digit year key is a
+    1-Jan start (byte-compatible with pre-reset-date data); anything else is an ISO
     start date."""
     if len(key) == 4 and key.isdigit():
-        return reset_date(int(key), month, day)
+        return date(int(key), 1, 1)
     return date.fromisoformat(key)
+
+
+def _next_period_start(s, month, day, anchor, period_start):
+    """Where the period beginning on `s` ends and the next begins. Normally the next
+    reset after `s`; for the one-time pinned stub/stretch period (`s` is the pinned
+    `period_start`) it is the stored `anchor`, so the roll-forward treats that
+    irregular period as a single unit rather than splitting it on the recurrence."""
+    if period_start is not None and s == period_start:
+        return anchor
+    return next_reset(s, month, day)
 
 
 def carry_in_for(db, employee, today, policy=None):
@@ -109,17 +131,20 @@ def carry_in_for(db, employee, today, policy=None):
     employee — the one persisted balance figure. Computed lazily and rolled forward,
     period by period, from the latest stored one; an employee with no stored carry
     yet is treated as starting this period (carry_in = 0), so a new hire never
-    accrues carry for periods they didn't work. Keyed per reset period, and
-    deterministic, so recomputing never double-counts. The advance fires whenever
-    `today` has moved into a period not yet stored — not on a fixed calendar year."""
+    accrues carry for periods they didn't work. Keyed per reset period (by start
+    date), and deterministic, so recomputing never double-counts. The advance fires
+    whenever `today` has moved into a period not yet stored — not on a fixed calendar
+    year — and a forward-only reset-date change keeps the current period's key, so its
+    stored carry (and the balance) doesn't shift."""
     policy = policy or get_policy(db)
     month, day = policy["reset_month"], policy["reset_day"]
+    anchor, period_start = policy.get("reset_anchor"), policy.get("reset_period_start")
     base = allowance_for(policy, employee, "vacation")
     max_carry = policy["max_carry_over"]["vacation"]
     max_total = policy["max_total"]["vacation"]
 
-    cur_start, _ = leave_period(today, month, day)
-    cur_key = period_key(cur_start, month, day)
+    cur_start, _ = _current_period(policy, today)
+    cur_key = period_key(cur_start)
 
     cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
     if cur_key in cmap:
@@ -128,16 +153,16 @@ def carry_in_for(db, employee, today, policy=None):
     if not cmap:
         cmap[cur_key] = 0  # first period ever seen — start of accrual
     else:
-        s = max(_stored_start(k, month, day) for k in cmap)
-        ci = cmap[period_key(s, month, day)]
+        s = max(_stored_start(k) for k in cmap)
+        ci = cmap[period_key(s)]
         while s < cur_start:
-            p_end = next_reset(s, month, day)  # next period's start; this period's exclusive end
+            p_end = _next_period_start(s, month, day, anchor, period_start)  # this period's exclusive end
             available = min(base + ci, max_total)
             used = _approved_weekdays_in(
                 db, employee["slack_user_id"], "vacation", s, p_end - timedelta(days=1)
             )
             ci = min(max(available - used, 0), max_carry)
-            cmap[period_key(p_end, month, day)] = ci
+            cmap[period_key(p_end)] = ci
             s = p_end
         cmap.setdefault(cur_key, 0)
 
@@ -150,10 +175,14 @@ def recompute_carry_in(db, employee, year):
     stored chain — the operator escape hatch after a closed prior period is edited."""
     policy = get_policy(db)
     month, day = policy["reset_month"], policy["reset_day"]
+    # A date in the `year` period, honouring a forward-only pin (whose period may start
+    # off the recurrence), so the rebuild lands on the right period key.
+    pin_start = policy["reset_period_start"]
+    rebuild_day = pin_start if (pin_start and pin_start.year == year) else reset_date(year, month, day)
     cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
-    cmap = {k: v for k, v in cmap.items() if _stored_start(k, month, day).year < year}
+    cmap = {k: v for k, v in cmap.items() if _stored_start(k).year < year}
     _persist_carry_in(db, employee, cmap)
-    return carry_in_for(db, employee, reset_date(year, month, day), policy)
+    return carry_in_for(db, employee, rebuild_day, policy)
 
 
 def recompute_all_carry_in(db, year):

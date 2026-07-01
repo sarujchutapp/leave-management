@@ -1,6 +1,7 @@
 from datetime import date
 
 from leave.leave_year import (
+    current_period,
     last_reset,
     leave_period,
     next_reset,
@@ -73,10 +74,26 @@ def test_feb29_reset_clamps_to_feb28_in_a_common_year():
 
 
 def test_period_key_is_byte_compatible_year_for_jan1():
-    assert period_key(date(2026, 1, 1), 1, 1) == "2026"
+    assert period_key(date(2026, 1, 1)) == "2026"
 
 
 def test_period_key_is_iso_for_non_jan1_and_unique_across_a_stub():
     # Two resets in one calendar year (1 Jan then 13 Apr after a stub) key distinctly.
-    assert period_key(date(2026, 4, 13), 4, 13) == "2026-04-13"
-    assert period_key(date(2026, 1, 1), 1, 1) != period_key(date(2026, 4, 13), 4, 13)
+    assert period_key(date(2026, 4, 13)) == "2026-04-13"
+    assert period_key(date(2026, 1, 1)) != period_key(date(2026, 4, 13))
+
+
+def test_current_period_without_a_pin_is_the_plain_recurrence():
+    assert current_period(date(2026, 6, 1), 1, 1) == leave_period(date(2026, 6, 1), 1, 1)
+
+
+def test_current_period_holds_a_pinned_stretch_then_advances_aligned():
+    # Pinned stretch period: started 1 Jan 2026, reset moved to 13 Apr so it now ends
+    # 13 Apr 2027. Until then the pinned start holds; after, it advances a clean year.
+    anchor, start = date(2027, 4, 13), date(2026, 1, 1)
+    assert current_period(date(2026, 6, 1), 4, 13, anchor, start) == (start, anchor)
+    # A day past the anchor: the pin is spent, the recurrence takes over.
+    assert current_period(date(2027, 6, 1), 4, 13, anchor, start) == (
+        date(2027, 4, 13),
+        date(2028, 4, 13),
+    )

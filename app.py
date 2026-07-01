@@ -312,9 +312,9 @@ def build_app(calendar=None, faas=False):
 
         # Carry-over submit: write the caps in the ack phase, then recompute every
         # employee's stored carry_in post-ack (a Scan) so the ack stays under 3s.
-        def _carry_over_ack(ack, body, view):
+        def _carry_over_ack(ack, body, view, client):
             with db.connect() as d:
-                submit_carry_over_ack(ack, body, view, d, admin_ids)
+                submit_carry_over_ack(ack, body, view, d, admin_ids, client)
 
         def _carry_over_lazy(body, view, client):
             with db.connect() as d:
