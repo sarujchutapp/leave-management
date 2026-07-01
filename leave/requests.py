@@ -389,21 +389,48 @@ def get_request(db, request_id):
     return _deserialize(item)
 
 
+def _won_transition(update):
+    """Run a conditional status update, returning True if it applied and False if the
+    condition failed (another writer already moved the request). Makes the pending->
+    decided transitions atomic, so a double-click or duplicate delivery can't fire the
+    side effects (calendar event, DMs, board) twice."""
+    try:
+        update()
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def approve_request(db, request_id):
-    db.requests.update_item(
-        Key={"request_id": request_id},
-        UpdateExpression="SET #s = :s, updated_at = :u",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "approved", ":u": _now_iso()},
+    """Move a request pending -> approved. Returns True if this call performed the
+    transition, False if it was already decided (the caller must then skip the
+    approval side effects)."""
+    return _won_transition(
+        lambda: db.requests.update_item(
+            Key={"request_id": request_id},
+            UpdateExpression="SET #s = :s, updated_at = :u",
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": "approved", ":u": _now_iso(), ":pending": "pending"},
+        )
     )
 
 
 def decline_request(db, request_id, reason):
-    db.requests.update_item(
-        Key={"request_id": request_id},
-        UpdateExpression="SET #s = :s, decline_reason = :r, updated_at = :u",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "declined", ":r": reason, ":u": _now_iso()},
+    """Move a request pending -> declined. Returns True if this call performed the
+    transition, False if it was already decided."""
+    return _won_transition(
+        lambda: db.requests.update_item(
+            Key={"request_id": request_id},
+            UpdateExpression="SET #s = :s, decline_reason = :r, updated_at = :u",
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s": "declined", ":r": reason, ":u": _now_iso(), ":pending": "pending"
+            },
+        )
     )
 
 
@@ -509,11 +536,20 @@ def early_return(db, request_id, today):
 
 
 def cancel_request(db, request_id):
-    db.requests.update_item(
-        Key={"request_id": request_id},
-        UpdateExpression="SET #s = :s, updated_at = :u",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "cancelled", ":u": _now_iso()},
+    """Move a request pending/approved -> cancelled. Returns True if this call performed
+    the transition, False if it was already cancelled/declined (so the caller skips the
+    withdraw/calendar/board side effects). `can_cancel` still gates the business rule
+    (an approved request must not have started); this guards the concurrent double-fire."""
+    return _won_transition(
+        lambda: db.requests.update_item(
+            Key={"request_id": request_id},
+            UpdateExpression="SET #s = :s, updated_at = :u",
+            ConditionExpression="#s IN (:pending, :approved)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s": "cancelled", ":u": _now_iso(), ":pending": "pending", ":approved": "approved"
+            },
+        )
     )
 
 

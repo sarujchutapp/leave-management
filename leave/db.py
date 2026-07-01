@@ -56,18 +56,6 @@ def list_reports(db, manager_id):
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
 
-def list_employees(db):
-    """All registered employees (real rows only); the reserved policy/board items
-    have no real_name, so they're excluded. Scans the employees table."""
-    people, scan_kwargs = [], {}
-    while True:
-        resp = db.employees.scan(**scan_kwargs)
-        people += [i for i in resp["Items"] if i.get("real_name")]
-        if "LastEvaluatedKey" not in resp:
-            return people
-        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-
-
 def employee_with_name(db, real_name, exclude_id=None):
     """The employee whose `real_name` matches (case-insensitive, trimmed), excluding
     `exclude_id` — used to keep names unique so manager approval tickets are
