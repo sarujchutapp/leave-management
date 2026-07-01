@@ -17,7 +17,8 @@ from botocore.exceptions import ClientError
 
 from leave.balance import request_days
 from leave.board import BOARD_KEY, reset_board
-from leave.holidays import HOLIDAYS_KEY, holidays_between, holidays_for_year
+from leave.holidays import HOLIDAYS_KEY, holidays_between
+from leave.leave_year import leave_period, next_reset, period_key, reset_date
 from leave.policy import POLICY_KEY, allowance_for, get_policy
 
 logger = logging.getLogger(__name__)
@@ -45,17 +46,25 @@ def _by_employee(db, employee_id):
     return resp["Items"]
 
 
-def approved_weekdays_this_year(db, employee_id, leave_type, today):
-    """Sum of weekdays across this employee's approved requests of this type
-    whose start_date falls in the current calendar year."""
-    year_start = date(today.year, 1, 1).isoformat()
-    year_end = date(today.year, 12, 31).isoformat()
+def _period_bounds(db, today, policy=None):
+    """The current leave period `[start, last_day]` (both inclusive `date`s) from the
+    central reset date, for querying the `by_employee` GSI. `last_day` is the day
+    before the next reset, so the reset day itself opens the next period."""
+    policy = policy or get_policy(db)
+    start, end = leave_period(today, policy["reset_month"], policy["reset_day"])
+    return start, end - timedelta(days=1)
+
+
+def _approved_weekdays_in(db, employee_id, leave_type, start, last_day):
+    """Sum of weekdays across this employee's approved requests of `leave_type` whose
+    start_date falls in the inclusive `[start, last_day]` window. Holidays are read
+    across that window (which may span two calendar years)."""
     resp = db.requests.query(
         IndexName=db.by_employee_index,
         KeyConditionExpression=Key("employee_id").eq(employee_id)
-        & Key("start_date").between(year_start, year_end),
+        & Key("start_date").between(start.isoformat(), last_day.isoformat()),
     )
-    holidays = holidays_for_year(db, today.year)
+    holidays = holidays_between(db, start, last_day)
     return sum(
         request_days(
             date.fromisoformat(r["start_date"]),
@@ -66,6 +75,13 @@ def approved_weekdays_this_year(db, employee_id, leave_type, today):
         for r in resp["Items"]
         if r["status"] == "approved" and r["leave_type"] == leave_type
     )
+
+
+def approved_weekdays_this_year(db, employee_id, leave_type, today):
+    """Sum of weekdays across this employee's approved requests of this type whose
+    start_date falls in the current leave period (the calendar year by default)."""
+    start, last_day = _period_bounds(db, today)
+    return _approved_weekdays_in(db, employee_id, leave_type, start, last_day)
 
 
 def _persist_carry_in(db, employee, cmap):
@@ -79,46 +95,65 @@ def _persist_carry_in(db, employee, cmap):
     employee["carry_in"] = cmap
 
 
-def carry_in_for(db, employee, year, policy=None):
-    """Vacation days carried into `year` for this employee — the one persisted
-    balance figure. Computed lazily and rolled forward from the latest stored
-    year; an employee with no stored carry yet is treated as starting this year
-    (carry_in = 0), so a new hire never accrues carry for years they didn't work.
-    Deterministic, so recomputing never double-counts."""
-    cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
-    if str(year) in cmap:
-        return cmap[str(year)]
+def _stored_start(key, month, day):
+    """The period start a stored carry_in key names. A bare 4-digit year key is the
+    1-Jan default (byte-compatible with pre-reset-date data); anything else is an ISO
+    start date."""
+    if len(key) == 4 and key.isdigit():
+        return reset_date(int(key), month, day)
+    return date.fromisoformat(key)
 
+
+def carry_in_for(db, employee, today, policy=None):
+    """Vacation days carried into the leave period containing `today` for this
+    employee — the one persisted balance figure. Computed lazily and rolled forward,
+    period by period, from the latest stored one; an employee with no stored carry
+    yet is treated as starting this period (carry_in = 0), so a new hire never
+    accrues carry for periods they didn't work. Keyed per reset period, and
+    deterministic, so recomputing never double-counts. The advance fires whenever
+    `today` has moved into a period not yet stored — not on a fixed calendar year."""
     policy = policy or get_policy(db)
+    month, day = policy["reset_month"], policy["reset_day"]
     base = allowance_for(policy, employee, "vacation")
     max_carry = policy["max_carry_over"]["vacation"]
     max_total = policy["max_total"]["vacation"]
 
+    cur_start, _ = leave_period(today, month, day)
+    cur_key = period_key(cur_start, month, day)
+
+    cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
+    if cur_key in cmap:
+        return cmap[cur_key]
+
     if not cmap:
-        cmap[str(year)] = 0  # first year ever seen — start of accrual
+        cmap[cur_key] = 0  # first period ever seen — start of accrual
     else:
-        last = max(int(y) for y in cmap)
-        ci = cmap[str(last)]
-        for y in range(last + 1, year + 1):
+        s = max(_stored_start(k, month, day) for k in cmap)
+        ci = cmap[period_key(s, month, day)]
+        while s < cur_start:
+            p_end = next_reset(s, month, day)  # next period's start; this period's exclusive end
             available = min(base + ci, max_total)
-            used = approved_weekdays_this_year(
-                db, employee["slack_user_id"], "vacation", date(y - 1, 1, 1)
+            used = _approved_weekdays_in(
+                db, employee["slack_user_id"], "vacation", s, p_end - timedelta(days=1)
             )
             ci = min(max(available - used, 0), max_carry)
-            cmap[str(y)] = ci
-        cmap.setdefault(str(year), 0)
+            cmap[period_key(p_end, month, day)] = ci
+            s = p_end
+        cmap.setdefault(cur_key, 0)
 
     _persist_carry_in(db, employee, cmap)
-    return cmap[str(year)]
+    return cmap[cur_key]
 
 
 def recompute_carry_in(db, employee, year):
-    """Rebuild carry_in[year] (and any later stored years) from the stored chain
-    — the operator escape hatch after a closed prior year is edited."""
+    """Rebuild the `year` reset period's carry_in (and any later stored ones) from the
+    stored chain — the operator escape hatch after a closed prior period is edited."""
+    policy = get_policy(db)
+    month, day = policy["reset_month"], policy["reset_day"]
     cmap = {k: int(v) for k, v in (employee.get("carry_in") or {}).items()}
-    cmap = {y: v for y, v in cmap.items() if int(y) < year}
+    cmap = {k: v for k, v in cmap.items() if _stored_start(k, month, day).year < year}
     _persist_carry_in(db, employee, cmap)
-    return carry_in_for(db, employee, year)
+    return carry_in_for(db, employee, reset_date(year, month, day), policy)
 
 
 def recompute_all_carry_in(db, year):
@@ -154,24 +189,23 @@ def remaining_balance(db, employee, leave_type, today):
     base = allowance_for(policy, employee, leave_type)
     used = approved_weekdays_this_year(db, employee["slack_user_id"], leave_type, today)
     if leave_type == "vacation":
-        carry = carry_in_for(db, employee, today.year, policy)
+        carry = carry_in_for(db, employee, today, policy)
         available = _vacation_available(base, carry, policy["max_total"]["vacation"])
         return available - used
     return base - used
 
 
 def approved_weekdays_by_type_this_year(db, employee_id, today):
-    """Approved weekdays per leave type for the current calendar year, from a single
-    `by_employee` query. Lets callers that need every type (the /dayoff modal) avoid
-    one query per type."""
-    year_start = date(today.year, 1, 1).isoformat()
-    year_end = date(today.year, 12, 31).isoformat()
+    """Approved weekdays per leave type for the current leave period (the calendar
+    year by default), from a single `by_employee` query. Lets callers that need every
+    type (the /dayoff modal) avoid one query per type."""
+    start, last_day = _period_bounds(db, today)
     resp = db.requests.query(
         IndexName=db.by_employee_index,
         KeyConditionExpression=Key("employee_id").eq(employee_id)
-        & Key("start_date").between(year_start, year_end),
+        & Key("start_date").between(start.isoformat(), last_day.isoformat()),
     )
-    holidays = holidays_for_year(db, today.year)
+    holidays = holidays_between(db, start, last_day)
     totals = {}
     for r in resp["Items"]:
         if r["status"] != "approved":
@@ -196,7 +230,7 @@ def remaining_balances(db, employee, today):
     for t in policy["allowances"]:
         base = allowance_for(policy, employee, t)
         if t == "vacation":
-            carry = carry_in_for(db, employee, today.year, policy)
+            carry = carry_in_for(db, employee, today, policy)
             available = _vacation_available(base, carry, policy["max_total"]["vacation"])
         else:
             available = base
@@ -216,19 +250,19 @@ def active_full_leave_ranges(db, employee_id):
 
 def pending_days(db, employee_id, leave_type, today):
     """Days of the employee's PENDING leave of `leave_type` whose start_date falls in
-    the current year (half-days count 0.5). Subtracted from the approved-only remaining
-    balance to get free-to-book days: pending is treated as reserved, so a request
-    can't be filed against quota already spoken for, and approving any subset can never
-    overshoot (see ADR-0010, superseding ADR-0008). The optimizer uses the same free
-    notion so its suggestions match what the validator will accept."""
-    year_start = date(today.year, 1, 1).isoformat()
-    year_end = date(today.year, 12, 31).isoformat()
+    the current leave period (the calendar year by default; half-days count 0.5).
+    Subtracted from the approved-only remaining balance to get free-to-book days:
+    pending is treated as reserved, so a request can't be filed against quota already
+    spoken for, and approving any subset can never overshoot (see ADR-0010, superseding
+    ADR-0008). The optimizer uses the same free notion so its suggestions match what
+    the validator will accept."""
+    start, last_day = _period_bounds(db, today)
     resp = db.requests.query(
         IndexName=db.by_employee_index,
         KeyConditionExpression=Key("employee_id").eq(employee_id)
-        & Key("start_date").between(year_start, year_end),
+        & Key("start_date").between(start.isoformat(), last_day.isoformat()),
     )
-    holidays = holidays_for_year(db, today.year)
+    holidays = holidays_between(db, start, last_day)
     return sum(
         request_days(
             date.fromisoformat(r["start_date"]),

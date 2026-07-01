@@ -59,3 +59,27 @@ within the current year stays derived live.
   carry-in" operator script if a closed year ever needs fixing.
 - Half-days make leftover/carry potentially fractional (e.g. `min(7.5, 5) = 5`); stored
   values move `int`→`Decimal` for these.
+
+## Update: the leave year is a configurable, forward-only boundary
+
+The "year" this model rolls carry over was originally the calendar year (auto-reset at
+1 Jan). It is now a company-wide, configurable **reset date** (`reset_month` /
+`reset_day` on the central policy, defaulting to 1 Jan). A pure **leave-year calendar
+seam** (`leave/leave_year.py`) is the single home for the current period `[last reset,
+next reset)`, the "upcoming occurrence", and the one-time stub/stretch transition — no
+DB, no clock. The balance and carry-in read their window from the seam instead of
+`today.year`.
+
+The model above is unchanged in spirit — minimal stored state, lazy self-triggering
+compute, nothing retroactive — with three refinements:
+
+- **Period-keyed carry.** `carry_in` is keyed per reset period, not per calendar year.
+  The 1-Jan default keys stay the bare year string (`"2026"`), byte-compatible with
+  existing data (no migration); any other reset date keys by the period's ISO start,
+  which stays unique even when a one-time stub puts two resets in one calendar year.
+- **The advance self-triggers on the period, not 1 Jan.** The lazy carry-in compute
+  fires the first time a balance is touched in a period not yet stored, rolling forward
+  period by period; the concurrent-first-touch conditional write is unchanged.
+- **Forward-only.** Changing the reset date never recomputes or reclassifies a past
+  period — it only sets where the current period next ends (a shorter stub or longer
+  stretch). Consistent with "only the cross-year hand-off is frozen".

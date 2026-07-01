@@ -95,3 +95,47 @@ def test_recompute_rebuilds_after_prior_year_change(db):
     _approve_vacation(db, "U_A", date(2026, 6, 8), date(2026, 6, 17))  # 8 weekdays
     recompute_carry_in(db, get_employee(db, "U_A"), 2027)
     assert get_employee(db, "U_A")["carry_in"]["2027"] == 2  # leftover 10-8=2 -> min(2,5)
+
+
+# --- Configurable leave-year reset date (issue #56): a non-1-Jan reset. ---
+
+
+def test_balance_over_a_non_jan_period_resets_on_the_configured_date(db):
+    # Reset on 13 Apr: the leave period runs Apr 13 -> Apr 13 next year.
+    set_policy(db, reset_month=4, reset_day=13)
+    upsert_employee(db, "U_A", "Alice", None)
+    _approve_vacation(db, "U_A", date(2026, 6, 8), date(2026, 6, 11))  # Mon-Thu = 4, in the period
+    emp = get_employee(db, "U_A")
+    # Still within the period at year-end: usage counts, nothing resets on 31 Dec.
+    assert remaining_balance(db, emp, "vacation", date(2026, 12, 31)) == 6
+    emp = get_employee(db, "U_A")
+    # On the reset date the period turns over: prior usage no longer counts and the
+    # unused days carry in (min(leftover 6, max_carry 5) = 5 -> min(10+5, 15) = 15).
+    assert remaining_balance(db, emp, "vacation", date(2027, 4, 13)) == 15
+
+
+def test_carry_in_keyed_per_reset_period_and_idempotent(db):
+    set_policy(db, reset_month=4, reset_day=13)
+    upsert_employee(db, "U_A", "Alice", None)
+    _approve_vacation(db, "U_A", date(2026, 6, 8), date(2026, 6, 11))  # 4 used in the 2026 period
+    emp = get_employee(db, "U_A")
+    remaining_balance(db, emp, "vacation", date(2026, 12, 31))  # seed the Apr-2026 period at 0
+    emp = get_employee(db, "U_A")
+    first = remaining_balance(db, emp, "vacation", date(2027, 4, 13))
+    emp = get_employee(db, "U_A")
+    second = remaining_balance(db, emp, "vacation", date(2027, 4, 13))
+    assert first == second == 15  # advancing across the reset is idempotent
+    # Keyed per reset period by start date, unique from any calendar-year key.
+    assert get_employee(db, "U_A")["carry_in"] == {"2026-04-13": 0, "2027-04-13": 5}
+
+
+def test_used_reads_holidays_across_a_period_spanning_two_calendar_years(db):
+    set_policy(db, reset_month=4, reset_day=13)
+    upsert_employee(db, "U_A", "Alice", None)
+    # Leave in Jan 2027 falls in the Apr-2026 -> Apr-2027 period, not a calendar year.
+    _approve_vacation(db, "U_A", date(2027, 1, 5), date(2027, 1, 7))  # Tue-Thu = 3
+    emp = get_employee(db, "U_A")
+    assert remaining_balance(db, emp, "vacation", date(2027, 2, 1)) == 7  # 10 - 3
+    upsert_holiday(db, date(2027, 1, 6), "midweek")  # inside the period, second calendar year
+    emp = get_employee(db, "U_A")
+    assert remaining_balance(db, emp, "vacation", date(2027, 2, 1)) == 8  # used drops to 2
