@@ -61,7 +61,7 @@ from leave.requests import (
     decline_request,
     get_request,
     half_day_dates,
-    pending_vacation_days,
+    pending_days,
     recompute_all_carry_in,
     remaining_balance,
     remaining_balances,
@@ -843,10 +843,10 @@ def open_leave_modal(ack, body, client, db, today=None):
 
 def _free_vacation_balance(db, employee, today):
     """Vacation days truly free to book: remaining (approved-only) minus pending.
-    Pending counts as committed, so the optimizer never suggests over what's already
-    in flight — validate_request, the hard gate, stays approved-only (ADR-0008)."""
-    return remaining_balance(db, employee, "vacation", today) - pending_vacation_days(
-        db, employee["slack_user_id"], today
+    Pending counts as reserved, so the optimizer never suggests over what's already in
+    flight — the same free notion validate_request now gates on (ADR-0010)."""
+    return remaining_balance(db, employee, "vacation", today) - pending_days(
+        db, employee["slack_user_id"], "vacation", today
     )
 
 
@@ -1367,6 +1367,9 @@ def handle_decline_click(ack, body, client, db):
     ack()
     request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
+    if request is None:
+        _close_dead_ticket(client, body["channel"]["id"], body["message"]["ts"])
+        return
     if request["status"] != "pending":
         _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
         return
@@ -1444,6 +1447,11 @@ def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None
     request_id = view["state"]["values"]["request"]["value"]["selected_option"]["value"]
     request = get_request(db, request_id)
 
+    if request is None:
+        # The row vanished between opening the modal and submitting (e.g. /control
+        # Clear, or the employee was removed) — nothing left to cancel.
+        _notify(client, body["user"]["id"], CANNOT_CANCEL)
+        return
     if body["user"]["id"] != request["employee_id"]:
         return
     if not can_cancel(request, today):

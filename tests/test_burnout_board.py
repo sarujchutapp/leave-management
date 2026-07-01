@@ -9,6 +9,7 @@ handshake are exercised at the handler seam with the Slack fakes.
 import json
 from datetime import date
 
+from leave.balance import count_weekdays
 from leave.blocks import NUDGE_ACTION
 from leave.db import get_employee
 from leave.handlers import NOT_A_MANAGER, handle_nudge, open_burnout, refresh_burnout
@@ -83,6 +84,29 @@ def test_ranked_signals_order_by_no_break_stretch_longest_first(db):
     signals = ranked_burnout_signals(db, [get_employee(db, "U_B"), get_employee(db, "U_A")], TODAY)
     assert [s.name for s in signals] == ["Alice", "Bob"]  # longest stretch first, not input order
     assert signals[0].stretch > signals[1].stretch
+
+
+def test_working_stretch_counts_only_elapsed_year_not_future(db):
+    # #6: the longest working stretch is measured to *today*, not year-end, so a
+    # person with no leave isn't credited with the whole year's future weekdays.
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    [sig] = ranked_burnout_signals(db, [get_employee(db, "U_A")], TODAY)
+    assert sig.working == count_weekdays(date(2026, 1, 1), TODAY)
+    assert sig.working < count_weekdays(date(2026, 1, 1), date(2026, 12, 31))  # future excluded
+
+
+def test_stretch_is_zero_while_currently_on_leave(db):
+    # #7: a report on approved leave right now is resting, not enduring a run — their
+    # no-break stretch reads 0 (least at risk), even though their last *ended* leave
+    # was long ago.
+    set_policy(db)
+    upsert_employee(db, "U_A", "Alice", None)
+    _approved_past_leave(db, "U_A", date(2026, 1, 5), date(2026, 1, 5))  # last ended leave, long ago
+    on_now = create_request(db, "U_A", "vacation", date(2026, 6, 1), date(2026, 6, 12), None)
+    approve_request(db, on_now)  # covers TODAY (2026-06-08)
+    [sig] = ranked_burnout_signals(db, [get_employee(db, "U_A")], TODAY)
+    assert sig.stretch == 0
 
 
 def test_manager_sees_direct_reports_ranked_with_explainable_flags(db):

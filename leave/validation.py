@@ -4,7 +4,12 @@ errors; empty dict means valid."""
 from leave.balance import request_days
 from leave.holidays import holidays_between
 from leave.policy import get_policy
-from leave.requests import continuous_absence_length, has_overlap, remaining_balance
+from leave.requests import (
+    continuous_absence_length,
+    has_overlap,
+    pending_days,
+    remaining_balance,
+)
 
 
 def validate_request(db, employee, leave_type, start, end, today, half=None):
@@ -30,10 +35,15 @@ def validate_request(db, employee, leave_type, start, end, today, half=None):
         errors["start_date"] = "That range has no working days — weekends and holidays don't use leave."
         return errors
 
-    remaining = remaining_balance(db, employee, leave_type, today)
-    if requested > remaining:
+    # Pending leave reserves quota (ADR-0010): a request can't be filed against days
+    # already spoken for by pending or approved leave, so approving any subset can
+    # never overshoot. `free` is the approved-only remaining minus what's pending.
+    free = remaining_balance(db, employee, leave_type, today) - pending_days(
+        db, employee["slack_user_id"], leave_type, today
+    )
+    if requested > free:
         errors["leave_type"] = (
-            f"Not enough {leave_type} balance: {requested} requested, {remaining} left."
+            f"Not enough {leave_type} balance: {requested} requested, {free} left."
         )
 
     if has_overlap(db, employee["slack_user_id"], start, end):

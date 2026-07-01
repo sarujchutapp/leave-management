@@ -82,6 +82,24 @@ def test_decline_click_opens_modal_with_metadata(db):
     assert meta["ts"] == "222.2"
 
 
+def test_decline_click_on_deleted_request_closes_ticket(db):
+    # The row is gone (Clear / employee-delete) but the manager's ticket is still
+    # live. Clicking Decline must close it gracefully, not crash — like Approve.
+    rid = _setup(db)
+    db.requests.delete_item(Key={"request_id": rid})
+    client = FakeSlackClient()
+
+    handle_decline_click(
+        ack=FakeAck(),
+        body=make_action_body(rid, "U_BOSS", channel="C9", ts="222.2"),
+        client=client,
+        db=db,
+    )
+
+    assert client.views_open_calls == []  # no decline modal opened
+    assert len(client.chat_update_calls) == 1  # dead ticket closed
+
+
 def test_decline_submit_sets_status_and_notifies_with_reason(db):
     rid = _setup(db)
     client = FakeSlackClient()
