@@ -1596,7 +1596,7 @@ def test_manage_delete_after_reassigning_reports_succeeds(db):
     assert get_employee(db, "U_M") is None
 
 
-def _holidays_view(action="add", holiday_date=None, label=None, remove=None):
+def _holidays_view(action="add", holiday_date=None, label=None, remove=None, import_text=None):
     """A view_submission state payload matching build_holidays_modal."""
     return {
         "state": {
@@ -1607,6 +1607,7 @@ def _holidays_view(action="add", holiday_date=None, label=None, remove=None):
                 "holiday_remove": {
                     "value": {"selected_option": {"value": remove}} if remove else {}
                 },
+                "holiday_import": {"value": {"value": import_text}},
             }
         }
     }
@@ -1646,6 +1647,24 @@ def test_holidays_switch_to_remove_lists_existing(db):
     assert "holiday_date" not in ids  # add fields hidden in remove mode
     block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_remove")
     assert [o["value"] for o in block["element"]["options"]] == ["2026-04-13"]
+
+
+def test_holidays_switch_to_import_shows_paste_field(db):
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "import"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+    )
+    view = client.views_update_calls[0]["view"]
+    ids = {b.get("block_id") for b in view["blocks"]}
+    assert "holiday_import" in ids
+    assert "holiday_date" not in ids  # add fields hidden in import mode
+    block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_import")
+    assert block["element"]["multiline"] is True
 
 
 def test_holidays_remove_mode_with_none_shows_note(db):
@@ -1695,6 +1714,44 @@ def test_holidays_remove_deletes_event_and_entry(db):
     )
     assert holidays_for_year(db, 2026) == set()
     assert cal.deleted == ["evt9"]
+
+
+def test_holidays_import_applies_rows_and_confirms_count(db):
+    cal = FakeCalendar()
+    ack = FakeAck()
+    client = FakeSlackClient()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(
+            action="import",
+            import_text="2026-04-13,Songkran\n2026-05-01,Labour Day",
+        ),
+        db=db,
+        calendar=cal,
+        client=client,
+        admin_ids=ADMINS,
+    )
+    assert ack.response == {"response_action": "clear"}
+    assert holidays_for_year(db, 2026) == {date(2026, 4, 13), date(2026, 5, 1)}
+    assert len(cal.created) == 2  # both mirrored onto the calendar
+    dm = client.chat_postMessage_calls[0]["text"]
+    assert "2" in dm  # confirmation names the imported count
+
+
+def test_holidays_import_non_admin_rejected(db):
+    cal = FakeCalendar()
+    submit_holidays(
+        ack=FakeAck(),
+        body={"user": {"id": "U_OTHER"}},
+        view=_holidays_view(action="import", import_text="2026-04-13,Songkran"),
+        db=db,
+        calendar=cal,
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert holidays_for_year(db, 2026) == set()
+    assert cal.created == []
 
 
 def test_holidays_add_requires_date_and_label(db):

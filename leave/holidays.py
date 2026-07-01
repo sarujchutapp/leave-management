@@ -114,3 +114,22 @@ def parse_holiday_rows(raw_rows):
             continue
         rows.append((date.fromisoformat(first), raw[1].strip()))
     return rows
+
+
+def parse_holiday_text(raw):
+    """Parse pasted `date,label` text into (date, label) pairs. Accepts comma- or
+    tab-delimited rows (an Excel/Sheets copy yields tabs), splitting each line on the
+    first delimiter only so a label keeps any commas it contains. Skips blank lines
+    and a leading `date,label` header."""
+    rows = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        delimiter = "\t" if "\t" in line else ","
+        first, _, rest = line.partition(delimiter)
+        first = first.strip()
+        if first.lower() == "date":  # header
+            continue
+        rows.append((date.fromisoformat(first), rest.strip()))
+    return rows

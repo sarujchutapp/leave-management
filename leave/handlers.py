@@ -47,7 +47,13 @@ from leave.report import (
 )
 from leave.seed import delete_employee, set_allowance_override, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
-from leave.holidays import all_holidays, apply_holidays, delete_holiday, holidays_for_year
+from leave.holidays import (
+    all_holidays,
+    apply_holidays,
+    delete_holiday,
+    holidays_for_year,
+    parse_holiday_text,
+)
 from leave.optimizer import Member, group_break, top_breaks
 from leave.requests import (
     active_full_leave_ranges,
@@ -427,6 +433,13 @@ def _parse_holiday_submission(view):
     return d, label, remove
 
 
+def _import_text(view):
+    """The pasted holiday text from the import field, or "" when absent."""
+    return (
+        view["state"]["values"].get("holiday_import", {}).get("value", {}).get("value") or ""
+    )
+
+
 def update_holidays_modal(ack, body, client, db, admin_ids):
     """Action select changed: re-render the modal in place so only the chosen mode's
     fields show (Add → date + label, Remove → the current-holidays dropdown)."""
@@ -453,6 +466,9 @@ def submit_holidays_ack(ack, body, view, admin_ids):
             return True
         ack(response_action="errors", errors={"holiday_remove": "Pick a holiday to remove."})
         return False
+    if _holiday_action(view) == "import":
+        ack(response_action="clear")  # close on success; row validation is the next slice
+        return True
     errors = {}
     if not d:
         errors["holiday_date"] = "Pick the holiday's date."
@@ -480,6 +496,10 @@ def submit_holidays_apply(body, view, db, calendar, client, admin_ids):
         if removed and removed.get("calendar_event_id"):
             calendar.delete_event(removed["calendar_event_id"])
         _notify(client, user_id, f"🗑️ Removed holiday {remove}.")
+    elif _holiday_action(view) == "import":
+        rows = parse_holiday_text(_import_text(view))
+        apply_holidays(db, calendar, rows)
+        _notify(client, user_id, f"✅ Imported {len(rows)} holidays.")
     elif d and label:
         apply_holidays(db, calendar, [(d, label)])
         _notify(client, user_id, f"✅ Saved holiday {d.isoformat()} — {label}.")
