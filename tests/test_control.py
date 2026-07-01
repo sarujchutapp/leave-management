@@ -1640,6 +1640,7 @@ def test_holidays_switch_to_remove_lists_existing(db):
         client=client,
         db=db,
         admin_ids=ADMINS,
+        today=date(2026, 1, 1),  # before the holiday, so it lists
     )
     view = client.views_update_calls[0]["view"]
     ids = {b.get("block_id") for b in view["blocks"]}
@@ -1647,6 +1648,45 @@ def test_holidays_switch_to_remove_lists_existing(db):
     assert "holiday_date" not in ids  # add fields hidden in remove mode
     block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_remove")
     assert [o["value"] for o in block["element"]["options"]] == ["2026-04-13"]
+
+
+def test_holidays_remove_scopes_to_today_onward(db):
+    upsert_holiday(db, date(2020, 1, 1), "Old holiday")   # long past
+    upsert_holiday(db, date(2026, 4, 13), "Songkran")     # past this year
+    upsert_holiday(db, date(2026, 12, 31), "NYE")         # future
+    upsert_holiday(db, date(2035, 1, 1), "Far future")    # far future
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "remove"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2026, 7, 1),
+    )
+    view = client.views_update_calls[0]["view"]
+    block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_remove")
+    opts = block["element"]["options"]
+    assert [o["value"] for o in opts] == ["2026-12-31", "2035-01-01"]  # past excluded
+    assert opts[0]["text"]["text"] == "2026-12-31 — NYE"  # still date — label
+
+
+def test_holidays_remove_all_past_shows_note(db):
+    upsert_holiday(db, date(2026, 4, 13), "Songkran")  # only a past holiday exists
+    client = FakeSlackClient()
+    update_holidays_modal(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
+              "actions": [{"selected_option": {"value": "remove"}}]},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=date(2026, 7, 1),
+    )
+    view = client.views_update_calls[0]["view"]
+    assert "holiday_remove" not in {b.get("block_id") for b in view["blocks"]}
+    assert any("No holidays to remove" in str(b) for b in view["blocks"])
 
 
 def test_holidays_switch_to_import_shows_paste_field(db):

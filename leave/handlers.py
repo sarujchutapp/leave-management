@@ -401,14 +401,23 @@ def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today
         submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today)
 
 
-def open_holidays(ack, body, client, db, admin_ids):
+def _upcoming_holidays(db, today):
+    """Holidays dated today or later — the Remove picker's scope. Holidays accumulate
+    year over year, so scoping to current-and-future keeps the dropdown permanently
+    under Slack's 100-option static_select limit (a past holiday never affects future
+    leave counting, and a re-import can overwrite anything)."""
+    return [h for h in all_holidays(db) if h[0] >= today]
+
+
+def open_holidays(ack, body, client, db, admin_ids, today=None):
     """Holidays button: re-checks admin, then pushes the add/remove modal, the
-    remove dropdown pre-filled with the current holidays."""
+    remove dropdown pre-filled with the current (today-onward) holidays."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
+    today = today or date.today()
     client.views_push(
-        trigger_id=body["trigger_id"], view=build_holidays_modal(all_holidays(db))
+        trigger_id=body["trigger_id"], view=build_holidays_modal(_upcoming_holidays(db, today))
     )
 
 
@@ -441,15 +450,17 @@ def _import_text(view):
     )
 
 
-def update_holidays_modal(ack, body, client, db, admin_ids):
+def update_holidays_modal(ack, body, client, db, admin_ids, today=None):
     """Action select changed: re-render the modal in place so only the chosen mode's
     fields show (Add → date + label, Remove → the current-holidays dropdown)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
+    today = today or date.today()
     action = body["actions"][0]["selected_option"]["value"]
     client.views_update(
-        view_id=body["view"]["id"], view=build_holidays_modal(all_holidays(db), action)
+        view_id=body["view"]["id"],
+        view=build_holidays_modal(_upcoming_holidays(db, today), action),
     )
 
 
