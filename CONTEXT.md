@@ -106,6 +106,16 @@ aren't on the board. A warning the manager weighs, never a block. The seed of a
 later enforced capacity cap.
 _Avoid_: conflict checker, blackout, capacity limit
 
+**Early return**:
+Ending an *in-progress* leave at today rather than its original end date. The days
+already taken — through today — stay taken: consumed against quota and kept on the
+record. Only the untaken remainder is returned to the employee's balance and cleared
+from the calendar and leave board. Offered through the same flow as a cancellation and
+marked *in progress*, but distinct from one: a **cancellation** voids a whole request
+that has not started yet (or is still pending), whereas an early return preserves the
+portion already lived and never refunds a day already spent.
+_Avoid_: trim, shorten, partial cancel
+
 **No-break stretch**:
 How long a person has *actually* gone without time off — calendar days since their
 last *taken* (past approved) leave, up to today (backward-looking; the year start is
