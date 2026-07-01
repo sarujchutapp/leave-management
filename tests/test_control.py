@@ -1705,6 +1705,7 @@ def test_holidays_switch_to_import_shows_paste_field(db):
     assert "holiday_date" not in ids  # add fields hidden in import mode
     block = next(b for b in view["blocks"] if b.get("block_id") == "holiday_import")
     assert block["element"]["multiline"] is True
+    assert "2026-04-13,Songkran" in block["hint"]["text"]  # example format shown below the box
 
 
 def test_holidays_remove_mode_with_none_shows_note(db):

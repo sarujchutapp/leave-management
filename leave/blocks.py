@@ -653,6 +653,10 @@ def build_holidays_modal(holidays, action="add"):
                 "type": "input",
                 "block_id": "holiday_import",
                 "label": {"type": "plain_text", "text": "Paste holidays (date,label per line)"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Example:\n2026-04-13,Songkran\n2026-12-31,New Year's Eve",
+                },
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "value",
