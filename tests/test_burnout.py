@@ -26,6 +26,13 @@ def test_never_taken_leave_anchors_at_year_start():
     assert stretch == (TODAY - date(2026, 1, 1)).days
 
 
+def test_never_taken_leave_anchors_at_the_leave_period_start():
+    # With a non-1-Jan leave year, the stretch opens at the current period start,
+    # not the calendar-year start.
+    stretch = no_break_stretch(TODAY, None, period_start=date(2026, 4, 13))
+    assert stretch == (TODAY - date(2026, 4, 13)).days
+
+
 def test_expiring_quota_is_remaining_beyond_the_carry_cap():
     # Holds 12 vacation days, only 5 may carry over: 7 expire at year-end.
     assert expiring_quota(12, 5) == 7

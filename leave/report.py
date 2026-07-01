@@ -10,7 +10,7 @@ Pure `db -> CSV text` functions (no Slack), so they're tested directly:
 import csv
 import io
 from collections import namedtuple
-from datetime import date
+from datetime import date, timedelta
 
 from boto3.dynamodb.conditions import Key
 
@@ -19,7 +19,8 @@ from leave.blocks import LEAVE_TYPES
 from leave.board import BOARD_KEY
 from leave.burnout import expiring_quota, longest_working_stretch, no_break_stretch
 from leave.db import get_employee
-from leave.holidays import HOLIDAYS_KEY, holidays_between, holidays_for_year
+from leave.holidays import HOLIDAYS_KEY, holidays_between
+from leave.leave_year import leave_period
 from leave.policy import POLICY_KEY, get_policy
 from leave.requests import (
     approved_weekdays_by_type_this_year,
@@ -97,16 +98,16 @@ BurnoutSignals = namedtuple(
 )
 
 
-def employee_burnout_signals(db, emp, today, holidays, year_start, days_left, max_carry_over):
+def employee_burnout_signals(db, emp, today, holidays, period_start, days_left, max_carry_over):
     """One employee's burnout signals: the no-break stretch (rank key) plus the
     supporting flags. The stretch is days since their last *taken* leave up to today
     (backward only), and reads 0 while they are currently on approved leave — they're
     resting now, not enduring a run. `next_break` is the start of their earliest future
     approved/pending break (or None) — relief that lowers their risk on the board.
     Approved/pending leave are the breaks that reset the longest working stretch, which
-    is measured over the elapsed year (year start .. today) — future days aren't worked
-    yet. `expiring` is the vacation that won't carry past year-end under the live policy
-    cap."""
+    is measured over the elapsed leave period (period start .. today) — future days
+    aren't worked yet. `expiring` is the vacation that won't carry past the reset date
+    under the live policy cap."""
     requests = _employee_requests(db, emp["slack_user_id"])
     taken_ends = [
         date.fromisoformat(r["end_date"])
@@ -128,8 +129,10 @@ def employee_burnout_signals(db, emp, today, holidays, year_start, days_left, ma
         for r in requests
         if r["status"] in ("approved", "pending")
     ]
-    stretch = 0 if on_leave_today else no_break_stretch(today, max(taken_ends, default=None))
-    working = longest_working_stretch(year_start, today, leave_ranges, holidays)
+    stretch = (
+        0 if on_leave_today else no_break_stretch(today, max(taken_ends, default=None), period_start)
+    )
+    working = longest_working_stretch(period_start, today, leave_ranges, holidays)
     remaining = remaining_balance(db, emp, "vacation", today)
     expiring = expiring_quota(remaining, max_carry_over)
     next_break = min(booked_starts, default=None)
@@ -143,14 +146,16 @@ def ranked_burnout_signals(db, employees, today):
     stretch first, then — among equal stretches — whoever has *nothing* booked ahead
     (no relief coming) ranks higher, then name. The single computation the burnout
     CSV report and the /burnout board both call, so they cannot drift. Reads the
-    live policy carry-over cap once for the expiring figure."""
-    year_start = date(today.year, 1, 1)
-    year_end = date(today.year, 12, 31)
-    holidays = holidays_for_year(db, today.year)
-    days_left = (year_end - today).days
-    max_carry_over = get_policy(db)["max_carry_over"]["vacation"]
+    live policy carry-over cap once for the expiring figure. Everything is measured
+    over the current leave period (the calendar year by default)."""
+    policy = get_policy(db)
+    period_start, period_end = leave_period(today, policy["reset_month"], policy["reset_day"])
+    last_day = period_end - timedelta(days=1)  # 31 Dec by default
+    holidays = holidays_between(db, period_start, last_day)
+    days_left = (last_day - today).days
+    max_carry_over = policy["max_carry_over"]["vacation"]
     signals = [
-        employee_burnout_signals(db, emp, today, holidays, year_start, days_left, max_carry_over)
+        employee_burnout_signals(db, emp, today, holidays, period_start, days_left, max_carry_over)
         for emp in employees
     ]
     signals.sort(key=lambda s: (-s.stretch, s.next_break is not None, s.name))

@@ -5,7 +5,7 @@ injects ack/body/view/client/logger by parameter name.
 """
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 from leave.blocks import (
     CARRY_OVER_TOGGLE_ACTION,
@@ -52,9 +52,10 @@ from leave.holidays import (
     all_holidays,
     apply_holidays,
     delete_holiday,
-    holidays_for_year,
+    holidays_between,
     parse_holiday_text,
 )
+from leave.leave_year import leave_period
 from leave.optimizer import Member, group_break, top_breaks
 from leave.requests import (
     active_full_leave_ranges,
@@ -894,22 +895,30 @@ def _free_vacation_balance(db, employee, today):
     )
 
 
+def _optimizer_horizon(db, today):
+    """The optimizer's horizon for `today`: the last day of the current leave period
+    (the day before the next reset — 31 Dec by default) and the holidays across the
+    window up to the reset. A suggested break stays within the current leave year, so
+    it resets its quota fresh next period; the window may span two calendar years."""
+    policy = get_policy(db)
+    _, period_end = leave_period(today, policy["reset_month"], policy["reset_day"])
+    last_day = period_end - timedelta(days=1)
+    return last_day, holidays_between(db, today, period_end)
+
+
 def _suggest_breaks(db, employee, today):
     """Gather the optimizer's inputs from the db and return the caller's top
-    distinct bookable vacation breaks this year (longest-first, up to 3). Sources
-    balance, holidays, existing full-day leave and the consecutive cap from the
-    same places the request flow uses, so every suggested break passes
-    validate_request. Holidays span this year and the next so a late-year run can
-    extend into January free days."""
+    distinct bookable vacation breaks in the current leave period (longest-first, up
+    to 3). Sources balance, holidays, existing full-day leave and the consecutive cap
+    from the same places the request flow uses, so every suggested break passes
+    validate_request. Breaks are bounded by the next reset, not 31 Dec."""
     uid = employee["slack_user_id"]
     balance = _free_vacation_balance(db, employee, today)
-    holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
+    last_day, holidays = _optimizer_horizon(db, today)
     existing = active_full_leave_ranges(db, uid)
     blocked = half_day_dates(db, uid)
     cap = get_policy(db)["consecutive_limit"]["vacation"]
-    return top_breaks(
-        today, date(today.year, 12, 31), balance, holidays, existing, cap, blocked_dates=blocked
-    )
+    return top_breaks(today, last_day, balance, holidays, existing, cap, blocked_dates=blocked)
 
 
 def open_advance(ack, body, client, db, today=None):
@@ -1006,14 +1015,14 @@ def submit_group_break_apply(body, view, client, db, today=None):
     if caller is None:
         return
     picked = _picked_users(view)
-    holidays = holidays_for_year(db, today.year) | holidays_for_year(db, today.year + 1)
+    last_day, holidays = _optimizer_horizon(db, today)
     cap = get_policy(db)["consecutive_limit"]["vacation"]
     members = []
     for uid in dict.fromkeys([caller_id] + picked):  # caller first, de-duplicated
         emp = get_employee(db, uid)
         if emp is not None:
             members.append(_gather_member(db, emp, today, holidays, cap))
-    window = group_break(today, date(today.year, 12, 31), holidays, members)
+    window = group_break(today, last_day, holidays, members)
     if window is None:
         _notify(client, caller_id, GROUP_NO_WINDOW)
         return
@@ -1134,7 +1143,7 @@ def _nudge_message(stretch, expiring):
         "your last time off."
     )
     if expiring:
-        msg += f" You also have *{expiring}* vacation day(s) set to expire on Dec 31."
+        msg += f" You also have *{expiring}* vacation day(s) that expire when your leave year resets."
     msg += (
         " Taking a break is good for you. No pressure — but if you'd like to plan one, "
         "`/advance` can suggest the best windows. 🌴"

@@ -9,21 +9,22 @@ interrupts. Both are explainable by construction — plain day arithmetic, no sc
 from datetime import date, timedelta
 
 
-def no_break_stretch(today, last_taken_end):
+def no_break_stretch(today, last_taken_end, period_start=None):
     """Calendar days a person has actually gone without time off: from the end of
     their last taken (past approved) leave up to today. With no past leave the
-    window opens at the start of the year (a defined anchor, never an error). Looks
+    window opens at the start of the current leave period (`period_start`, or the
+    calendar-year start when not given — a defined anchor, never an error). Looks
     *backward only* — a break booked ahead is relief, not time already endured, so
     it never inflates this count (it lowers risk instead; see the board's ranking)."""
-    anchor = last_taken_end or date(today.year, 1, 1)
+    anchor = last_taken_end or period_start or date(today.year, 1, 1)
     return max((today - anchor).days, 0)
 
 
 def expiring_quota(remaining_vacation, max_carry_over):
-    """Vacation days that won't survive year-end: the remaining balance beyond what
-    the policy lets carry over (`max_carry_over`), floored at zero. A person holding
-    no more than the cap loses nothing — the rest carries into next year. Explainable
-    by construction: plain subtraction against the live policy cap."""
+    """Vacation days that won't survive the leave-year reset: the remaining balance
+    beyond what the policy lets carry over (`max_carry_over`), floored at zero. A
+    person holding no more than the cap loses nothing — the rest carries into the next
+    period. Explainable by construction: plain subtraction against the live policy cap."""
     return max(remaining_vacation - max_carry_over, 0)
 
 
