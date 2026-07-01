@@ -253,13 +253,11 @@ def build_app(calendar=None, faas=False):
 
     @app.action(REPORT_ACTION)
     def _report(ack, body, client):
-        with db.connect() as d:
-            open_report(ack, body, client, d, admin_ids)
+        open_report(ack, body, client, admin_ids)
 
     @app.action(REPORT_TYPE_ACTION)
     def _report_type_changed(ack, body, client):
-        with db.connect() as d:
-            update_report_modal(ack, body, client, d, admin_ids)
+        update_report_modal(ack, body, client, admin_ids)
 
     @app.action(DECLINE_ACTION)
     def _decline_click(ack, body, client):
@@ -301,8 +299,8 @@ def build_app(calendar=None, faas=False):
 
         # Report submit: validate the choice in the ack phase (closes the modal),
         # then build the CSV (a Scan for quota) + upload post-ack.
-        def _report_ack(ack, body, view):
-            submit_report_ack(ack, body, view, admin_ids)
+        def _report_ack(ack, body, view, client):
+            submit_report_ack(ack, body, view, client, admin_ids)
 
         def _report_lazy(body, view, client):
             with db.connect() as d:

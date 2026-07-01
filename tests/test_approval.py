@@ -6,7 +6,13 @@ from leave.handlers import (
     handle_decline_click,
     handle_decline_submit,
 )
-from leave.requests import cancel_request, create_request, get_request
+from leave.requests import (
+    approve_request,
+    cancel_request,
+    create_request,
+    decline_request,
+    get_request,
+)
 from leave.seed import upsert_employee
 from tests.fakes import (
     FakeAck,
@@ -174,6 +180,30 @@ def test_cannot_double_approve(db):
 
     assert _status(db, rid) == "approved"
     assert len(calendar.created) == 1  # second click creates no second event
+
+
+def test_approve_transition_is_atomic(db):
+    # The pending->approved write is conditional: only the first caller wins, so a
+    # racing second approve can't fire the side effects (calendar event) again even if
+    # it slips past the status read-check.
+    rid = _setup(db)
+    assert approve_request(db, rid) is True   # won the transition
+    assert approve_request(db, rid) is False  # already approved — no-op
+
+
+def test_decline_transition_is_atomic(db):
+    rid = _setup(db)
+    assert decline_request(db, rid, "no") is True
+    assert decline_request(db, rid, "no") is False  # already declined
+    assert _status(db, rid) == "declined"
+
+
+def test_approve_then_decline_loses(db):
+    # Whichever transition lands first wins; the other reports it didn't apply.
+    rid = _setup(db)
+    assert approve_request(db, rid) is True
+    assert decline_request(db, rid, "too late") is False  # can't decline an approved request
+    assert _status(db, rid) == "approved"
 
 
 def test_cannot_decline_cancelled_request(db):

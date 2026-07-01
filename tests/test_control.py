@@ -1140,7 +1140,7 @@ def _report_view(report_type, person=None):
         "state": {
             "values": {
                 "report_type": {REPORT_TYPE_ACTION: {"selected_option": {"value": report_type}}},
-                "person": {"value": {"selected_option": {"value": person}}},
+                "person": {"value": {"selected_user": person}},
             }
         }
     }
@@ -1153,7 +1153,7 @@ def _block_ids(view):
 def test_report_modal_opens_with_picker_hidden(db):
     client = FakeSlackClient()
     ack = FakeAck()
-    open_report(ack=ack, body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, db=db, admin_ids=ADMINS)
+    open_report(ack=ack, body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
     view = client.views_push_calls[0]["view"]
     assert view["callback_id"] == REPORT_CALLBACK_ID
     ids = _block_ids(view)
@@ -1161,32 +1161,28 @@ def test_report_modal_opens_with_picker_hidden(db):
     assert "person" not in ids  # picker hidden until "history" is chosen
 
 
-def test_report_modal_reveals_and_hides_employee_picker(db):
-    upsert_employee(db, "U_A", "Alice", None)  # an employee to populate the dropdown
+def test_report_modal_reveals_and_hides_person_picker(db):
     client = FakeSlackClient()
-    # Selecting "history" updates the modal in place to show the employee picker.
+    # Selecting "history" updates the modal in place to show the person picker.
     update_report_modal(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
               "actions": [{"selected_option": {"value": "history"}}]},
         client=client,
-        db=db,
         admin_ids=ADMINS,
     )
     assert client.views_update_calls[0]["view_id"] == "V1"
     person_block = next(
         b for b in client.views_update_calls[0]["view"]["blocks"] if b.get("block_id") == "person"
     )
-    # It's a dropdown of employees (not a Slack user-picker, so no bots can appear).
-    assert person_block["element"]["type"] == "static_select"
-    assert [o["value"] for o in person_block["element"]["options"]] == ["U_A"]
+    # A Slack user-picker (no per-org cap); an app/bot pick is rejected on submit.
+    assert person_block["element"]["type"] == "users_select"
     # Switching back to "quota" hides it again.
     update_report_modal(
         ack=FakeAck(),
         body={"user": {"id": "U_ADMIN"}, "view": {"id": "V1"},
               "actions": [{"selected_option": {"value": "quota"}}]},
         client=client,
-        db=db,
         admin_ids=ADMINS,
     )
     assert "person" not in _block_ids(client.views_update_calls[1]["view"])
@@ -1238,7 +1234,7 @@ def test_report_history_dms_that_persons_csv(db):
 
 def test_report_modal_offers_burnout_option(db):
     client = FakeSlackClient()
-    open_report(ack=FakeAck(), body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, db=db, admin_ids=ADMINS)
+    open_report(ack=FakeAck(), body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"}, client=client, admin_ids=ADMINS)
     view = client.views_push_calls[0]["view"]
     block = next(b for b in view["blocks"] if b.get("block_id") == "report_type")
     values = {o["value"] for o in block["element"]["options"]}
@@ -1283,30 +1279,25 @@ def test_report_history_without_person_is_rejected(db):
     assert client.files_upload_v2_calls == []
 
 
-def test_report_history_no_employees_error_on_report_type(db):
-    # No registered employees -> the modal shows a note, not a person block. The
-    # "pick a person" error must anchor on report_type (always present), not on the
-    # missing person block where Slack would silently drop it.
+def test_report_history_rejects_bot_pick(db):
+    # The user-picker can't hide apps/bots, so a bot pick is rejected on submit
+    # (a bot has no leave history — picking one is a mistake, not a valid report).
     set_policy(db)
-    view = {
-        "state": {
-            "values": {
-                "report_type": {REPORT_TYPE_ACTION: {"selected_option": {"value": "history"}}},
-            }
-        }
-    }  # no "person" key — that block was never rendered
+    client = FakeSlackClient()
+    client.bot_users.add("U_BOT")
     ack = FakeAck()
     submit_report(
         ack=ack,
         body={"user": {"id": "U_ADMIN"}},
-        view=view,
+        view=_report_view("history", person="U_BOT"),
         db=db,
-        client=FakeSlackClient(),
+        client=client,
         admin_ids=ADMINS,
         today=TODAY,
     )
     assert ack.response["response_action"] == "errors"
-    assert "report_type" in ack.response["errors"]
+    assert "person" in ack.response["errors"]
+    assert client.files_upload_v2_calls == []
 
 
 def test_report_non_admin_rejected(db):

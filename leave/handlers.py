@@ -37,7 +37,7 @@ from leave.blocks import (
 )
 from leave.board import update_board
 from leave.calendar_client import color_id_for
-from leave.db import employee_with_name, get_employee, list_employees, list_reports
+from leave.db import employee_with_name, get_employee, list_reports
 from leave.policy import DEFAULT_POLICY, get_policy, set_policy
 from leave.report import (
     build_burnout_csv,
@@ -585,54 +585,48 @@ def submit_holidays(ack, body, view, db, calendar, client, admin_ids):
         submit_holidays_apply(body, view, db, calendar, client, admin_ids)
 
 
-def open_report(ack, body, client, db, admin_ids):
+def open_report(ack, body, client, admin_ids):
     """Report button: re-checks admin, then pushes the report-type modal (quota by
-    default — the person picker, a dropdown of registered employees, only appears
-    once 'history' is selected)."""
+    default — the person picker only appears once 'history' is selected)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
-    client.views_push(
-        trigger_id=body["trigger_id"],
-        view=build_report_modal(employees=list_employees(db)),
-    )
+    client.views_push(trigger_id=body["trigger_id"], view=build_report_modal())
 
 
-def update_report_modal(ack, body, client, db, admin_ids):
-    """Report-type select changed: re-render the modal so the employee dropdown shows
+def update_report_modal(ack, body, client, admin_ids):
+    """Report-type select changed: re-render the modal so the person picker shows
     only for 'history'. Updates in place by view_id (no new modal)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
     report_type = body["actions"][0]["selected_option"]["value"]
-    client.views_update(
-        view_id=body["view"]["id"],
-        view=build_report_modal(report_type, employees=list_employees(db)),
-    )
+    client.views_update(view_id=body["view"]["id"], view=build_report_modal(report_type))
 
 
 def _report_choice(view):
     values = view["state"]["values"]
     report_type = values["report_type"][REPORT_TYPE_ACTION]["selected_option"]["value"]
-    # The person picker is a dropdown of employees, so the value is selected_option.
-    person = values.get("person", {}).get("value", {}).get("selected_option", {}).get("value")
+    # The person picker is a Slack user-picker, so the value is selected_user.
+    person = values.get("person", {}).get("value", {}).get("selected_user")
     return report_type, person
 
 
-def submit_report_ack(ack, body, view, admin_ids):
-    """Ack phase (under 3s): re-check admin and validate the choice. A history
-    report needs a person picked. Returns True so the caller builds + sends."""
+def submit_report_ack(ack, body, view, client, admin_ids):
+    """Ack phase (under 3s): re-check admin and validate the choice. A history report
+    needs a person picked, and not an app/bot (the user-picker can't hide bots, so it's
+    rejected on submit). Returns True so the caller builds + sends."""
     if not is_admin(body["user"]["id"], admin_ids):
         ack()
         return False
     report_type, person = _report_choice(view)
-    if report_type == "history" and not person:
-        # With no registered employees the person picker isn't rendered, so anchor the
-        # error on report_type (always present) rather than a missing block, where
-        # Slack would silently drop it.
-        block = "person" if "person" in view["state"]["values"] else "report_type"
-        ack(response_action="errors", errors={block: "Pick the person whose history you want."})
-        return False
+    if report_type == "history":
+        if not person:
+            ack(response_action="errors", errors={"person": "Pick the person whose history you want."})
+            return False
+        if _is_bot(client, person):
+            ack(response_action="errors", errors={"person": "Pick a teammate, not an app or bot."})
+            return False
     ack(response_action="clear")  # close the whole modal stack on success
     return True
 
@@ -653,8 +647,8 @@ def submit_report_apply(body, view, db, client, admin_ids, today=None):
         return
     report_type, person = _report_choice(view)
     if report_type == "history":
-        if not person:
-            return
+        if not person or _is_bot(client, person):
+            return  # missing/bot pick already surfaced in the ack
         employee = get_employee(db, person)
         name = (employee or {}).get("real_name", person)
         _dm_csv(
@@ -687,7 +681,7 @@ def submit_report_apply(body, view, db, client, admin_ids, today=None):
 
 def submit_report(ack, body, view, db, client, admin_ids, today=None):
     """Synchronous submit (Socket Mode / tests): ack-with-validation, then build + DM."""
-    if submit_report_ack(ack, body, view, admin_ids):
+    if submit_report_ack(ack, body, view, client, admin_ids):
         submit_report_apply(body, view, db, client, admin_ids, today)
 
 
@@ -1240,14 +1234,19 @@ def _parse_submission(view):
 
 def _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half=None):
     """Mark approved and create the shared-calendar event, storing its id. The event
-    is tinted with the employee's stable colour so the calendar is readable per person."""
-    approve_request(db, request_id)
+    is tinted with the employee's stable colour so the calendar is readable per person.
+    Returns False without creating the event if the request was already decided by a
+    concurrent handler (the pending->approved transition is atomic), so the caller
+    skips the rest of the approval side effects."""
+    if not approve_request(db, request_id):
+        return False
     summary = f"{employee['real_name']} — {leave_type}"
     if half:
         summary += f" ({half})"
     color_id = color_id_for(employee["slack_user_id"])
     event_id = calendar.create_event(summary, start, end, color_id)
     set_calendar_event_id(db, request_id, event_id)
+    return True
 
 
 def _self_approves(employee):
@@ -1307,7 +1306,8 @@ def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None
 
     # Top of chain (no manager, or their own manager): auto-approve.
     if _self_approves(employee):
-        _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half)
+        if not _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half):
+            return
         _notify(
             client,
             employee["slack_user_id"],
@@ -1420,7 +1420,7 @@ def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
         _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
         return
 
-    _finalize_approval(
+    if not _finalize_approval(
         db,
         calendar,
         request_id,
@@ -1429,7 +1429,9 @@ def handle_approve(ack, body, client, db, calendar, sheets=None, today=None):
         request["start_date"],
         request["end_date"],
         request.get("half"),
-    )
+    ):
+        # A concurrent approve already won the transition and did the side effects.
+        return
     client.chat_update(
         channel=body["channel"]["id"],
         ts=body["message"]["ts"],
@@ -1505,7 +1507,9 @@ def handle_decline_submit(ack, body, view, client, db):
         _close_stale_ticket(client, meta["channel"], meta["ts"], request)
         return
 
-    decline_request(db, request_id, reason)
+    if not decline_request(db, request_id, reason):
+        # A concurrent decision already moved this request; don't notify twice.
+        return
     client.chat_update(
         channel=meta["channel"],
         ts=meta["ts"],
@@ -1626,7 +1630,9 @@ def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None
         return
 
     status_before = request["status"]
-    cancel_request(db, request_id)
+    if not cancel_request(db, request_id):
+        # A concurrent cancel/decision already moved this request; do nothing further.
+        return
     employee = get_employee(db, request["employee_id"])
 
     if status_before == "pending" and request["ticket_ts"]:

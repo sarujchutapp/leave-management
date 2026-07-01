@@ -550,13 +550,16 @@ def build_cancel_modal(rows, today):
     (max 100 options) rather than radio_buttons (capped at 10) so a long backlog
     of upcoming/pending requests doesn't blow the limit and fail to open. An
     in-progress approved leave (start ≤ today ≤ end) is marked `(in progress)` — it
-    cancels as an early return rather than a full cancel."""
+    cancels as an early return rather than a full cancel. `rows` is ordered
+    earliest-first; a backlog beyond 100 is capped to the earliest 100 (with a note)
+    so the modal still opens — cancelling some reveals the rest."""
 
     def marker(r):
         if r["status"] == "approved" and r["start_date"] <= today <= r["end_date"]:
             return "in progress"
         return r["status"]
 
+    capped = rows[:100]
     options = [
         {
             "text": {
@@ -565,27 +568,40 @@ def build_cancel_modal(rows, today):
             },
             "value": str(r["request_id"]),
         }
-        for r in rows
+        for r in capped
     ]
+    blocks = [
+        {
+            "type": "input",
+            "block_id": "request",
+            "label": {"type": "plain_text", "text": "Which request?"},
+            "element": {
+                "type": "static_select",
+                "action_id": "value",
+                "placeholder": {"type": "plain_text", "text": "Pick a request"},
+                "options": options,
+            },
+        }
+    ]
+    if len(rows) > len(capped):
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Showing the earliest {len(capped)} of {len(rows)} — cancel some to see the rest.",
+                    }
+                ],
+            }
+        )
     return {
         "type": "modal",
         "callback_id": CANCEL_CALLBACK_ID,
         "title": {"type": "plain_text", "text": "Cancel Leave"},
         "submit": {"type": "plain_text", "text": "Cancel leave"},
         "close": {"type": "plain_text", "text": "Back"},
-        "blocks": [
-            {
-                "type": "input",
-                "block_id": "request",
-                "label": {"type": "plain_text", "text": "Which request?"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "value",
-                    "placeholder": {"type": "plain_text", "text": "Pick a request"},
-                    "options": options,
-                },
-            }
-        ],
+        "blocks": blocks,
     }
 
 
@@ -1016,13 +1032,12 @@ def build_manage_employees_modal(action="save", selected_user=None, employee=Non
     }
 
 
-def build_report_modal(report_type="quota", employees=None):
+def build_report_modal(report_type="quota"):
     """Pick which report to send: all-employee quota, one person's full leave
     history, or team burnout risk. The person picker is only shown once "history"
     is chosen — the report-type select dispatches a block action that re-renders
-    this modal. The person picker is a dropdown of *registered employees* (so it
-    can't list bots/apps the way a Slack user-picker would). The CSV is DMed to
-    the requesting admin."""
+    this modal. The person picker is a Slack user-picker (no per-org employee cap);
+    an app/bot pick is rejected on submit. The CSV is DMed to the requesting admin."""
     options = [
         {"text": {"type": "plain_text", "text": "All-employee quota"}, "value": "quota"},
         {"text": {"type": "plain_text", "text": "One person's leave history"}, "value": "history"},
@@ -1044,39 +1059,18 @@ def build_report_modal(report_type="quota", employees=None):
         },
     ]
     if report_type == "history":
-        people = sorted(employees or [], key=lambda e: e.get("real_name", ""))
-        if people:
-            blocks.append(
-                {
-                    "type": "input",
-                    "block_id": "person",
-                    "label": {"type": "plain_text", "text": "Person"},
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "value",
-                        "placeholder": {"type": "plain_text", "text": "Pick an employee"},
-                        "options": [
-                            {
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": (p.get("real_name") or p["slack_user_id"])[:75],
-                                },
-                                "value": p["slack_user_id"],
-                            }
-                            for p in people
-                        ],
-                    },
-                }
-            )
-        else:
-            blocks.append(
-                {
-                    "type": "context",
-                    "elements": [
-                        {"type": "mrkdwn", "text": "No registered employees yet."}
-                    ],
-                }
-            )
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": "person",
+                "label": {"type": "plain_text", "text": "Person"},
+                "element": {
+                    "type": "users_select",
+                    "action_id": "value",
+                    "placeholder": {"type": "plain_text", "text": "Pick a teammate"},
+                },
+            }
+        )
     return {
         "type": "modal",
         "callback_id": REPORT_CALLBACK_ID,

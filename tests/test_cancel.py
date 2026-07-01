@@ -354,6 +354,37 @@ def test_cancel_modal_lists_pending_and_future_approved_only(db):
     assert {o["value"] for o in options} == {str(pending), str(approved_future)}
 
 
+def test_cancel_transition_is_atomic(db):
+    # The pending/approved -> cancelled write is conditional, so a racing second cancel
+    # reports it didn't apply and the side effects don't fire twice.
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+    assert cancel_request(db, rid) is True
+    assert cancel_request(db, rid) is False  # already cancelled
+
+
+def test_cancel_modal_caps_at_100_with_note():
+    # A backlog beyond Slack's 100-option static_select limit is capped to the earliest
+    # 100 (rows arrive earliest-first) with a note, so the modal still opens.
+    rows = [
+        {
+            "request_id": f"r{i}",
+            "leave_type": "vacation",
+            "start_date": date(2026, 7, 1),
+            "end_date": date(2026, 7, 1),
+            "half": None,
+            "status": "pending",
+        }
+        for i in range(150)
+    ]
+    view = build_cancel_modal(rows, TODAY)
+    select = view["blocks"][0]["element"]
+    assert len(select["options"]) == 100
+    note = view["blocks"][1]
+    assert note["type"] == "context"
+    assert "earliest 100 of 150" in note["elements"][0]["text"]
+
+
 def test_cancel_modal_handles_more_than_ten_requests(db):
     # A backlog of >10 cancellable requests must still render (radio_buttons caps at
     # 10; static_select does not) so /dayoff-cancel doesn't fail to open.
