@@ -914,6 +914,27 @@ def test_report_csv_row_per_employee_and_type_with_derived_figures(db):
     assert by_type["personal"][2:] == ["0", "5", "0"]
 
 
+def test_report_csv_figures_use_the_current_leave_period(db):
+    # Leave year resets 13 Apr. On TODAY (8 Jun 2026) the period is Apr 2026 -> Apr
+    # 2027, so vacation taken before the period start doesn't count against it; only
+    # in-period usage does.
+    set_policy(
+        db,
+        allowances={"sick": 30, "vacation": 10, "personal": 5},
+        reset_month=4,
+        reset_day=13,
+    )
+    upsert_employee(db, "U_A", "Alice", None)
+    old = create_request(db, "U_A", "vacation", date(2026, 3, 2), date(2026, 3, 3), None)  # prior period
+    approve_request(db, old)
+    cur = create_request(db, "U_A", "vacation", date(2026, 6, 8), date(2026, 6, 11), None)  # 4 wd, in period
+    approve_request(db, cur)
+
+    by_type = {r[1]: r for r in _csv_rows(build_report_csv(db, TODAY))[1:]}
+    # Only the 4 in-period days count: used 4, remaining 10-4=6, no carry.
+    assert by_type["vacation"][2:] == ["4", "6", "0"]
+
+
 def test_report_csv_skips_reserved_items(db):
     set_policy(db)
     upsert_employee(db, "U_A", "Alice", None)

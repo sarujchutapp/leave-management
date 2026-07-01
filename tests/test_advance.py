@@ -16,6 +16,7 @@ from leave.handlers import (
     open_group_picker,
     submit_group_break,
 )
+from leave.policy import set_policy
 from leave.requests import create_request
 from leave.seed import upsert_employee
 from leave.validation import validate_request
@@ -336,6 +337,38 @@ def test_pending_vacation_shrinks_suggestions_to_free_days(db):
     breaks = _suggest_breaks(db, emp, TODAY)
     assert breaks
     assert max(brk.cost for brk in breaks) <= 2
+
+
+def test_suggestions_are_bounded_by_the_next_reset_not_dec_31(db):
+    # Leave year resets 1 Jul: on 8 Jun the current period ends 30 Jun, so no
+    # suggested break may book a day on or after the next reset — even with a balance
+    # big enough to otherwise reach deep into the calendar year.
+    set_policy(db, reset_month=7, reset_day=1)
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 20})
+    emp = get_employee(db, "U_A")
+    breaks = _suggest_breaks(db, emp, TODAY)
+    assert breaks
+    for brk in breaks:
+        assert brk.book_end < date(2026, 7, 1)
+
+
+def test_group_window_is_bounded_by_the_next_reset(db):
+    # The group-break finder shares the same horizon: a shared window can't run past
+    # the next reset (1 Jul here), not 31 Dec.
+    set_policy(db, reset_month=7, reset_day=1)
+    upsert_employee(db, "U_A", "Alice", None, allowances={"vacation": 20})
+    upsert_employee(db, "U_B", "Bob", None, allowances={"vacation": 20})
+    client = FakeSlackClient()
+    submit_group_break(
+        ack=FakeAck(),
+        body={"user": {"id": "U_A"}},
+        view=_group_view(["U_B"]),
+        client=client,
+        db=db,
+        today=TODAY,
+    )
+    _, end = _group_window(client.chat_postMessage_calls[0])
+    assert end < date(2026, 7, 1)
 
 
 def test_every_suggested_break_passes_validation(db):

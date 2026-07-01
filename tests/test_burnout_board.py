@@ -96,6 +96,17 @@ def test_working_stretch_counts_only_elapsed_year_not_future(db):
     assert sig.working < count_weekdays(date(2026, 1, 1), date(2026, 12, 31))  # future excluded
 
 
+def test_burnout_references_the_leave_period_not_the_calendar_year(db):
+    # Leave year resets 13 Apr: a report who has never taken leave has a no-break
+    # stretch anchored at the current period start (13 Apr), not 1 Jan, and days-left
+    # counts down to the next reset, not 31 Dec.
+    set_policy(db, reset_month=4, reset_day=13)
+    upsert_employee(db, "U_A", "Alice", None)
+    [sig] = ranked_burnout_signals(db, [get_employee(db, "U_A")], TODAY)
+    assert sig.stretch == (TODAY - date(2026, 4, 13)).days
+    assert sig.days_left == (date(2027, 4, 12) - TODAY).days
+
+
 def test_stretch_is_zero_while_currently_on_leave(db):
     # #7: a report on approved leave right now is resting, not enduring a run — their
     # no-break stretch reads 0 (least at risk), even though their last *ended* leave
