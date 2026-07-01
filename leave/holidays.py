@@ -116,20 +116,45 @@ def parse_holiday_rows(raw_rows):
     return rows
 
 
+class HolidayImportError(ValueError):
+    """A pasted holiday import failed validation. `errors` lists one human message per
+    offending line, so the modal can name every line the admin must fix at once."""
+
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
 def parse_holiday_text(raw):
     """Parse pasted `date,label` text into (date, label) pairs. Accepts comma- or
     tab-delimited rows (an Excel/Sheets copy yields tabs), splitting each line on the
     first delimiter only so a label keeps any commas it contains. Skips blank lines
-    and a leading `date,label` header."""
-    rows = []
-    for line in raw.splitlines():
+    and a leading `date,label` header.
+
+    All-or-nothing: gathers every invalid row and raises HolidayImportError naming the
+    offending line(s) rather than importing a partial set. An empty (or whitespace-only)
+    paste is itself an error."""
+    rows, errors = [], []
+    for lineno, line in enumerate(raw.splitlines(), 1):
         line = line.strip()
         if not line:
             continue
         delimiter = "\t" if "\t" in line else ","
         first, _, rest = line.partition(delimiter)
-        first = first.strip()
+        first, label = first.strip(), rest.strip()
         if first.lower() == "date":  # header
             continue
-        rows.append((date.fromisoformat(first), rest.strip()))
+        try:
+            holiday_date = date.fromisoformat(first)
+        except ValueError:
+            errors.append(f"Line {lineno}: couldn't read a date from “{first}”.")
+            continue
+        if not label:
+            errors.append(f"Line {lineno}: missing a label.")
+            continue
+        rows.append((holiday_date, label))
+    if not rows and not errors:
+        errors.append("Nothing to import — paste one date,label per line.")
+    if errors:
+        raise HolidayImportError(errors)
     return rows

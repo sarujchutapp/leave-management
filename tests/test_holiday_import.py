@@ -1,6 +1,9 @@
 from datetime import date
 
+import pytest
+
 from leave.holidays import (
+    HolidayImportError,
     apply_holidays,
     get_holiday,
     holidays_for_year,
@@ -78,3 +81,33 @@ def test_parse_holiday_text_skips_header_and_blanks():
         (date(2026, 4, 13), "Songkran"),
         (date(2026, 12, 31), "NYE"),
     ]
+
+
+def test_parse_holiday_text_rejects_unparseable_date():
+    with pytest.raises(HolidayImportError) as exc:
+        parse_holiday_text("2026-04-13,Songkran\nnotadate,Labour Day")
+    assert any("2" in msg for msg in exc.value.errors)  # names line 2
+    assert len(exc.value.errors) == 1
+
+
+def test_parse_holiday_text_rejects_missing_label():
+    with pytest.raises(HolidayImportError) as exc:
+        parse_holiday_text("2026-04-13,Songkran\n2026-05-01")  # no label
+    assert any("2" in msg for msg in exc.value.errors)
+    assert len(exc.value.errors) == 1
+
+
+def test_parse_holiday_text_rejects_empty_paste():
+    for raw in ("", "   \n\t  "):
+        with pytest.raises(HolidayImportError) as exc:
+            parse_holiday_text(raw)
+        assert exc.value.errors  # a clear, non-empty message
+
+
+def test_parse_holiday_text_names_every_offending_line():
+    """All-or-nothing: one bad date and one missing label are both reported."""
+    with pytest.raises(HolidayImportError) as exc:
+        parse_holiday_text("nope,Foo\n2026-05-01,Labour Day\n2026-06-01")
+    assert len(exc.value.errors) == 2
+    assert any("1" in m for m in exc.value.errors)
+    assert any("3" in m for m in exc.value.errors)

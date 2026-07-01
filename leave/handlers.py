@@ -48,6 +48,7 @@ from leave.report import (
 from leave.seed import delete_employee, set_allowance_override, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
 from leave.holidays import (
+    HolidayImportError,
     all_holidays,
     apply_holidays,
     delete_holiday,
@@ -467,7 +468,12 @@ def submit_holidays_ack(ack, body, view, admin_ids):
         ack(response_action="errors", errors={"holiday_remove": "Pick a holiday to remove."})
         return False
     if _holiday_action(view) == "import":
-        ack(response_action="clear")  # close on success; row validation is the next slice
+        try:
+            parse_holiday_text(_import_text(view))
+        except HolidayImportError as e:
+            ack(response_action="errors", errors={"holiday_import": "\n".join(e.errors)})
+            return False
+        ack(response_action="clear")
         return True
     errors = {}
     if not d:
@@ -497,7 +503,10 @@ def submit_holidays_apply(body, view, db, calendar, client, admin_ids):
             calendar.delete_event(removed["calendar_event_id"])
         _notify(client, user_id, f"🗑️ Removed holiday {remove}.")
     elif _holiday_action(view) == "import":
-        rows = parse_holiday_text(_import_text(view))
+        try:
+            rows = parse_holiday_text(_import_text(view))
+        except HolidayImportError:
+            return  # invalid paste already surfaced in the ack; import nothing
         apply_holidays(db, calendar, rows)
         _notify(client, user_id, f"✅ Imported {len(rows)} holidays.")
     elif d and label:

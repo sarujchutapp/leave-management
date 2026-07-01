@@ -1739,6 +1739,65 @@ def test_holidays_import_applies_rows_and_confirms_count(db):
     assert "2" in dm  # confirmation names the imported count
 
 
+def test_holidays_import_invalid_row_errors_and_imports_nothing(db):
+    cal = FakeCalendar()
+    ack = FakeAck()
+    client = FakeSlackClient()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(
+            action="import",
+            import_text="2026-04-13,Songkran\nnotadate,Labour Day",
+        ),
+        db=db,
+        calendar=cal,
+        client=client,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "holiday_import" in ack.response["errors"]
+    assert holidays_for_year(db, 2026) == set()  # store unchanged
+    assert cal.created == []  # calendar unchanged
+    assert client.chat_postMessage_calls == []  # no confirmation
+
+
+def test_holidays_import_empty_paste_errors(db):
+    ack = FakeAck()
+    submit_holidays(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(action="import", import_text="   \n  "),
+        db=db,
+        calendar=FakeCalendar(),
+        client=FakeSlackClient(),
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "holiday_import" in ack.response["errors"]
+
+
+def test_holidays_import_corrected_paste_succeeds(db):
+    cal = FakeCalendar()
+    client = FakeSlackClient()
+    # First a bad paste is rejected...
+    submit_holidays(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(action="import", import_text="notadate,Songkran"),
+        db=db, calendar=cal, client=client, admin_ids=ADMINS,
+    )
+    assert holidays_for_year(db, 2026) == set()
+    # ...then the corrected paste imports cleanly.
+    submit_holidays(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_holidays_view(action="import", import_text="2026-04-13,Songkran"),
+        db=db, calendar=cal, client=client, admin_ids=ADMINS,
+    )
+    assert holidays_for_year(db, 2026) == {date(2026, 4, 13)}
+
+
 def test_holidays_import_non_admin_rejected(db):
     cal = FakeCalendar()
     submit_holidays(
