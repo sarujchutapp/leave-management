@@ -47,7 +47,14 @@ from leave.report import (
 )
 from leave.seed import delete_employee, set_allowance_override, upsert_employee
 from leave.coverage import format_coverage_warning, peer_overlap
-from leave.holidays import all_holidays, apply_holidays, delete_holiday, holidays_for_year
+from leave.holidays import (
+    HolidayImportError,
+    all_holidays,
+    apply_holidays,
+    delete_holiday,
+    holidays_for_year,
+    parse_holiday_text,
+)
 from leave.optimizer import Member, group_break, top_breaks
 from leave.requests import (
     active_full_leave_ranges,
@@ -61,7 +68,7 @@ from leave.requests import (
     decline_request,
     get_request,
     half_day_dates,
-    pending_vacation_days,
+    pending_days,
     recompute_all_carry_in,
     remaining_balance,
     remaining_balances,
@@ -394,14 +401,23 @@ def submit_clear(ack, body, view, db, calendar, sheets, client, admin_ids, today
         submit_clear_apply(body, view, db, calendar, sheets, client, admin_ids, today)
 
 
-def open_holidays(ack, body, client, db, admin_ids):
+def _upcoming_holidays(db, today):
+    """Holidays dated today or later — the Remove picker's scope. Holidays accumulate
+    year over year, so scoping to current-and-future keeps the dropdown permanently
+    under Slack's 100-option static_select limit (a past holiday never affects future
+    leave counting, and a re-import can overwrite anything)."""
+    return [h for h in all_holidays(db) if h[0] >= today]
+
+
+def open_holidays(ack, body, client, db, admin_ids, today=None):
     """Holidays button: re-checks admin, then pushes the add/remove modal, the
-    remove dropdown pre-filled with the current holidays."""
+    remove dropdown pre-filled with the current (today-onward) holidays."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
+    today = today or date.today()
     client.views_push(
-        trigger_id=body["trigger_id"], view=build_holidays_modal(all_holidays(db))
+        trigger_id=body["trigger_id"], view=build_holidays_modal(_upcoming_holidays(db, today))
     )
 
 
@@ -427,15 +443,24 @@ def _parse_holiday_submission(view):
     return d, label, remove
 
 
-def update_holidays_modal(ack, body, client, db, admin_ids):
+def _import_text(view):
+    """The pasted holiday text from the import field, or "" when absent."""
+    return (
+        view["state"]["values"].get("holiday_import", {}).get("value", {}).get("value") or ""
+    )
+
+
+def update_holidays_modal(ack, body, client, db, admin_ids, today=None):
     """Action select changed: re-render the modal in place so only the chosen mode's
     fields show (Add → date + label, Remove → the current-holidays dropdown)."""
     ack()
     if not is_admin(body["user"]["id"], admin_ids):
         return
+    today = today or date.today()
     action = body["actions"][0]["selected_option"]["value"]
     client.views_update(
-        view_id=body["view"]["id"], view=build_holidays_modal(all_holidays(db), action)
+        view_id=body["view"]["id"],
+        view=build_holidays_modal(_upcoming_holidays(db, today), action),
     )
 
 
@@ -453,6 +478,14 @@ def submit_holidays_ack(ack, body, view, admin_ids):
             return True
         ack(response_action="errors", errors={"holiday_remove": "Pick a holiday to remove."})
         return False
+    if _holiday_action(view) == "import":
+        try:
+            parse_holiday_text(_import_text(view))
+        except HolidayImportError as e:
+            ack(response_action="errors", errors={"holiday_import": "\n".join(e.errors)})
+            return False
+        ack(response_action="clear")
+        return True
     errors = {}
     if not d:
         errors["holiday_date"] = "Pick the holiday's date."
@@ -480,6 +513,13 @@ def submit_holidays_apply(body, view, db, calendar, client, admin_ids):
         if removed and removed.get("calendar_event_id"):
             calendar.delete_event(removed["calendar_event_id"])
         _notify(client, user_id, f"🗑️ Removed holiday {remove}.")
+    elif _holiday_action(view) == "import":
+        try:
+            rows = parse_holiday_text(_import_text(view))
+        except HolidayImportError:
+            return  # invalid paste already surfaced in the ack; import nothing
+        apply_holidays(db, calendar, rows)
+        _notify(client, user_id, f"✅ Imported {len(rows)} holidays.")
     elif d and label:
         apply_holidays(db, calendar, [(d, label)])
         _notify(client, user_id, f"✅ Saved holiday {d.isoformat()} — {label}.")
@@ -843,10 +883,10 @@ def open_leave_modal(ack, body, client, db, today=None):
 
 def _free_vacation_balance(db, employee, today):
     """Vacation days truly free to book: remaining (approved-only) minus pending.
-    Pending counts as committed, so the optimizer never suggests over what's already
-    in flight — validate_request, the hard gate, stays approved-only (ADR-0008)."""
-    return remaining_balance(db, employee, "vacation", today) - pending_vacation_days(
-        db, employee["slack_user_id"], today
+    Pending counts as reserved, so the optimizer never suggests over what's already in
+    flight — the same free notion validate_request now gates on (ADR-0010)."""
+    return remaining_balance(db, employee, "vacation", today) - pending_days(
+        db, employee["slack_user_id"], "vacation", today
     )
 
 
@@ -1367,6 +1407,9 @@ def handle_decline_click(ack, body, client, db):
     ack()
     request_id = body["actions"][0]["value"]
     request = get_request(db, request_id)
+    if request is None:
+        _close_dead_ticket(client, body["channel"]["id"], body["message"]["ts"])
+        return
     if request["status"] != "pending":
         _close_stale_ticket(client, body["channel"]["id"], body["message"]["ts"], request)
         return
@@ -1444,6 +1487,11 @@ def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None
     request_id = view["state"]["values"]["request"]["value"]["selected_option"]["value"]
     request = get_request(db, request_id)
 
+    if request is None:
+        # The row vanished between opening the modal and submitting (e.g. /control
+        # Clear, or the employee was removed) — nothing left to cancel.
+        _notify(client, body["user"]["id"], CANNOT_CANCEL)
+        return
     if body["user"]["id"] != request["employee_id"]:
         return
     if not can_cancel(request, today):

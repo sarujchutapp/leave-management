@@ -2,7 +2,7 @@ from datetime import date
 
 from leave.db import get_employee
 from leave.holidays import upsert_holiday
-from leave.requests import create_request
+from leave.requests import create_request, remaining_balance
 from leave.seed import upsert_employee
 from leave.validation import validate_request
 
@@ -59,6 +59,34 @@ def test_holiday_only_request_rejected(db):
     upsert_holiday(db, date(2026, 6, 10), "Company holiday")  # a Wednesday
     errors = validate_request(db, alice, "sick", date(2026, 6, 10), date(2026, 6, 10), TODAY)
     assert "working day" in errors.get("start_date", "")
+
+
+def test_pending_reserves_quota_so_second_request_is_blocked(db):
+    # ADR-0010: pending leave reserves quota. A pending request already holds both
+    # vacation days, so a second non-overlapping day can't be booked — even though the
+    # approved-only remaining (what the ticket shows) is still 2.
+    alice = _alice(db)  # vacation allowance = 2
+    create_request(db, "U_ALICE", "vacation", date(2026, 6, 10), date(2026, 6, 11), None)  # 2 pending
+    assert remaining_balance(db, alice, "vacation", TODAY) == 2  # approved-only, unchanged
+    errors = validate_request(db, alice, "vacation", date(2026, 6, 17), date(2026, 6, 17), TODAY)
+    assert "leave_type" in errors
+
+
+def test_pending_reserves_quota_for_non_vacation_types(db):
+    # The reserve rule is all types, not just vacation.
+    alice = _alice(db)  # personal allowance = 5
+    create_request(db, "U_ALICE", "personal", date(2026, 6, 8), date(2026, 6, 12), None)  # 5 wd pending
+    errors = validate_request(db, alice, "personal", date(2026, 6, 15), date(2026, 6, 15), TODAY)
+    assert "leave_type" in errors
+
+
+def test_pending_still_leaves_room_for_a_fitting_request(db):
+    # Reserve must not over-block: one pending day leaves one free, so a one-day
+    # request still passes.
+    alice = _alice(db)  # vacation allowance = 2
+    create_request(db, "U_ALICE", "vacation", date(2026, 6, 10), date(2026, 6, 10), None)  # 1 pending
+    errors = validate_request(db, alice, "vacation", date(2026, 6, 17), date(2026, 6, 17), TODAY)
+    assert errors == {}
 
 
 def test_range_including_a_weekend_is_still_valid(db):

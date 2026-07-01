@@ -1,6 +1,15 @@
 from datetime import date
 
-from leave.holidays import apply_holidays, get_holiday, holidays_for_year, parse_holiday_rows
+import pytest
+
+from leave.holidays import (
+    HolidayImportError,
+    apply_holidays,
+    get_holiday,
+    holidays_for_year,
+    parse_holiday_rows,
+    parse_holiday_text,
+)
 from tests.fakes import FakeCalendar
 
 
@@ -40,3 +49,65 @@ def test_parse_holiday_rows_skips_header_and_blanks():
         (date(2026, 4, 13), "Songkran"),
         (date(2026, 12, 31), "NYE"),
     ]
+
+
+def test_parse_holiday_text_comma():
+    raw = "2026-04-13,Songkran\n2026-05-01,Labour Day"
+    assert parse_holiday_text(raw) == [
+        (date(2026, 4, 13), "Songkran"),
+        (date(2026, 5, 1), "Labour Day"),
+    ]
+
+
+def test_parse_holiday_text_tab_is_identical():
+    """An Excel/Sheets copy yields tab-delimited rows — parses the same as commas."""
+    raw = "2026-04-13\tSongkran\n2026-05-01\tLabour Day"
+    assert parse_holiday_text(raw) == [
+        (date(2026, 4, 13), "Songkran"),
+        (date(2026, 5, 1), "Labour Day"),
+    ]
+
+
+def test_parse_holiday_text_preserves_comma_in_label():
+    """Splitting on the first delimiter only keeps a label's own commas intact."""
+    assert parse_holiday_text("2026-12-31,New Year's Eve, observed") == [
+        (date(2026, 12, 31), "New Year's Eve, observed"),
+    ]
+
+
+def test_parse_holiday_text_skips_header_and_blanks():
+    raw = "date,label\n2026-04-13,Songkran\n\n2026-12-31, NYE "
+    assert parse_holiday_text(raw) == [
+        (date(2026, 4, 13), "Songkran"),
+        (date(2026, 12, 31), "NYE"),
+    ]
+
+
+def test_parse_holiday_text_rejects_unparseable_date():
+    with pytest.raises(HolidayImportError) as exc:
+        parse_holiday_text("2026-04-13,Songkran\nnotadate,Labour Day")
+    assert any("2" in msg for msg in exc.value.errors)  # names line 2
+    assert len(exc.value.errors) == 1
+
+
+def test_parse_holiday_text_rejects_missing_label():
+    with pytest.raises(HolidayImportError) as exc:
+        parse_holiday_text("2026-04-13,Songkran\n2026-05-01")  # no label
+    assert any("2" in msg for msg in exc.value.errors)
+    assert len(exc.value.errors) == 1
+
+
+def test_parse_holiday_text_rejects_empty_paste():
+    for raw in ("", "   \n\t  "):
+        with pytest.raises(HolidayImportError) as exc:
+            parse_holiday_text(raw)
+        assert exc.value.errors  # a clear, non-empty message
+
+
+def test_parse_holiday_text_names_every_offending_line():
+    """All-or-nothing: one bad date and one missing label are both reported."""
+    with pytest.raises(HolidayImportError) as exc:
+        parse_holiday_text("nope,Foo\n2026-05-01,Labour Day\n2026-06-01")
+    assert len(exc.value.errors) == 2
+    assert any("1" in m for m in exc.value.errors)
+    assert any("3" in m for m in exc.value.errors)

@@ -1,5 +1,10 @@
 # Optimizer plans against free days; the validator gates on approved-only
 
+> **Superseded by [ADR-0010](0010-pending-leave-reserves-quota.md).** The validator
+> no longer gates on approved-only — it subtracts pending too (pending reserves
+> quota). The optimizer/validator asymmetry described below is now an equality. Kept
+> for the historical rationale.
+
 The Leave Optimizer (`/advance`) suggests breaks against an employee's *free*
 vacation days — `available − (all pending + approved vacation days, half-days
 counted as 0.5)` — and treats pending/approved half-day dates as blocked-but-

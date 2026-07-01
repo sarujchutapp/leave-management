@@ -124,6 +124,19 @@ def test_cannot_cancel_approved_after_start(db):
     assert client.chat_postMessage_calls[0]["text"] == CANNOT_CANCEL
 
 
+def test_cancel_on_vanished_request(db):
+    # The row is deleted (e.g. /control Clear) between opening the cancel modal and
+    # submitting it. Submit must not crash — the user is told it's gone.
+    _people(db)
+    rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)
+    db.requests.delete_item(Key={"request_id": rid})
+    client = FakeSlackClient()
+
+    _cancel(db, rid, "U_ALICE", client=client)
+
+    assert client.chat_postMessage_calls[0]["text"] == CANNOT_CANCEL
+
+
 def test_other_user_cannot_cancel(db):
     _people(db)
     rid = create_request(db, "U_ALICE", "vacation", FUTURE_START, FUTURE_END, None)

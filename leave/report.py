@@ -97,19 +97,27 @@ BurnoutSignals = namedtuple(
 )
 
 
-def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left, max_carry_over):
+def employee_burnout_signals(db, emp, today, holidays, year_start, days_left, max_carry_over):
     """One employee's burnout signals: the no-break stretch (rank key) plus the
     supporting flags. The stretch is days since their last *taken* leave up to today
-    (backward only). `next_break` is the start of their earliest future approved/
-    pending break (or None) — relief that lowers their risk on the board. Approved/
-    pending leave are the breaks that reset the longest working stretch. `expiring`
-    is the vacation that won't carry past year-end under the live policy cap."""
+    (backward only), and reads 0 while they are currently on approved leave — they're
+    resting now, not enduring a run. `next_break` is the start of their earliest future
+    approved/pending break (or None) — relief that lowers their risk on the board.
+    Approved/pending leave are the breaks that reset the longest working stretch, which
+    is measured over the elapsed year (year start .. today) — future days aren't worked
+    yet. `expiring` is the vacation that won't carry past year-end under the live policy
+    cap."""
     requests = _employee_requests(db, emp["slack_user_id"])
     taken_ends = [
         date.fromisoformat(r["end_date"])
         for r in requests
         if r["status"] == "approved" and date.fromisoformat(r["end_date"]) < today
     ]
+    on_leave_today = any(
+        date.fromisoformat(r["start_date"]) <= today <= date.fromisoformat(r["end_date"])
+        for r in requests
+        if r["status"] == "approved"
+    )
     booked_starts = [
         date.fromisoformat(r["start_date"])
         for r in requests
@@ -120,8 +128,8 @@ def employee_burnout_signals(db, emp, today, holidays, year_start, year_end, day
         for r in requests
         if r["status"] in ("approved", "pending")
     ]
-    stretch = no_break_stretch(today, max(taken_ends, default=None))
-    working = longest_working_stretch(year_start, year_end, leave_ranges, holidays)
+    stretch = 0 if on_leave_today else no_break_stretch(today, max(taken_ends, default=None))
+    working = longest_working_stretch(year_start, today, leave_ranges, holidays)
     remaining = remaining_balance(db, emp, "vacation", today)
     expiring = expiring_quota(remaining, max_carry_over)
     next_break = min(booked_starts, default=None)
@@ -142,7 +150,7 @@ def ranked_burnout_signals(db, employees, today):
     days_left = (year_end - today).days
     max_carry_over = get_policy(db)["max_carry_over"]["vacation"]
     signals = [
-        employee_burnout_signals(db, emp, today, holidays, year_start, year_end, days_left, max_carry_over)
+        employee_burnout_signals(db, emp, today, holidays, year_start, days_left, max_carry_over)
         for emp in employees
     ]
     signals.sort(key=lambda s: (-s.stretch, s.next_break is not None, s.name))

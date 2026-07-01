@@ -203,3 +203,29 @@ def test_never_spends_a_working_day_next_year():
 
 def test_no_balance_returns_none():
     assert longest_break(date(2026, 6, 1), YEAR_END, 0, set(), [], 15) is None
+
+
+def test_longest_break_with_cap_disabled_is_bounded_only_by_balance():
+    # cap=None means the admin turned the consecutive limit off (unbounded run).
+    # With 10 vacation days the finder books both Mon-Fri weeks (06-01..06-12) and
+    # the span runs the surrounding weekends — 16 days, past the default 15-day cap.
+    brk = longest_break(date(2026, 6, 1), YEAR_END, 10, set(), [], None)
+    assert brk is not None
+    assert brk.cost == 10
+    assert brk.book_end == date(2026, 6, 12)
+    assert brk.span_days == 16
+
+
+def test_top_breaks_with_cap_disabled_does_not_crash():
+    breaks = top_breaks(date(2026, 6, 1), YEAR_END, 5, set(), [], None)
+    assert breaks
+
+
+def test_group_break_with_cap_disabled_is_bounded_only_by_balance():
+    # A member cap of None (consecutive limit disabled) must not crash and must be
+    # bounded only by balance: 10 vacation days each -> a 10-working-day window,
+    # more than the 5 a finite cap of 9 would allow.
+    members = [Member(10, None, []), Member(10, None, [])]
+    window = group_break(date(2026, 6, 1), YEAR_END, set(), members)
+    assert window is not None
+    assert _working_days(*window) == 10

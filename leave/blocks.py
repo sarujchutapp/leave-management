@@ -594,6 +594,7 @@ _CONTROL_BUTTONS = [
 _HOLIDAY_ACTIONS = [
     {"text": {"type": "plain_text", "text": "Add a holiday"}, "value": "add"},
     {"text": {"type": "plain_text", "text": "Remove a holiday"}, "value": "remove"},
+    {"text": {"type": "plain_text", "text": "Import holidays"}, "value": "import"},
 ]
 
 
@@ -646,6 +647,19 @@ def build_holidays_modal(holidays, action="add"):
                     "elements": [{"type": "mrkdwn", "text": "No holidays to remove yet."}],
                 }
             )
+    elif action == "import":
+        blocks.append(
+            {
+                "type": "input",
+                "block_id": "holiday_import",
+                "label": {"type": "plain_text", "text": "Paste holidays (date,label per line)"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "value",
+                    "multiline": True,
+                },
+            }
+        )
     else:  # add
         blocks += [
             {

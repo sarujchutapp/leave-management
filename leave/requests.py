@@ -213,11 +213,13 @@ def active_full_leave_ranges(db, employee_id):
     ]
 
 
-def pending_vacation_days(db, employee_id, today):
-    """Days of the employee's PENDING vacation whose start_date falls in the current
-    year (half-days count 0.5). The optimizer subtracts these from remaining_balance
-    so it plans only against truly-free days — pending is treated as committed.
-    validate_request, the hard gate, stays approved-only (see ADR-0008)."""
+def pending_days(db, employee_id, leave_type, today):
+    """Days of the employee's PENDING leave of `leave_type` whose start_date falls in
+    the current year (half-days count 0.5). Subtracted from the approved-only remaining
+    balance to get free-to-book days: pending is treated as reserved, so a request
+    can't be filed against quota already spoken for, and approving any subset can never
+    overshoot (see ADR-0010, superseding ADR-0008). The optimizer uses the same free
+    notion so its suggestions match what the validator will accept."""
     year_start = date(today.year, 1, 1).isoformat()
     year_end = date(today.year, 12, 31).isoformat()
     resp = db.requests.query(
@@ -234,7 +236,7 @@ def pending_vacation_days(db, employee_id, today):
             holidays,
         )
         for r in resp["Items"]
-        if r["status"] == "pending" and r["leave_type"] == "vacation"
+        if r["status"] == "pending" and r["leave_type"] == leave_type
     )
 
 

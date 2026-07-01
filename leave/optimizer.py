@@ -25,6 +25,12 @@ LeaveBreak = namedtuple("LeaveBreak", "book_start book_end cost span_start span_
 _ONE = timedelta(days=1)
 
 
+def _as_cap(cap):
+    """A None consecutive limit means the cap is disabled — an unbounded run
+    (see validation.py, which treats None the same way)."""
+    return float("inf") if cap is None else cap
+
+
 def _is_working(d, holidays, ranges):
     """A day actually worked: a weekday that is neither holiday nor existing
     full-day leave. Such a day bounds a continuous absence."""
@@ -48,6 +54,7 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, bl
     any worked day — blocked-but-present."""
     if balance <= 0:
         return []
+    cap = _as_cap(cap)
 
     def worked(d, b_start, b_end):
         # Like _is_working, but the proposed booking also makes a day non-working.
@@ -185,7 +192,7 @@ def _member_can_be_off(member, w_start, w_end, holidays):
     while guard < 400 and not worked(run_end + _ONE):
         run_end += _ONE
         guard += 1
-    return (run_end - run_start).days + 1 <= member.cap
+    return (run_end - run_start).days + 1 <= _as_cap(member.cap)
 
 
 def _in_ranges(d, ranges):
@@ -210,7 +217,7 @@ def group_break(today, year_end, holidays, members):
     break); ties on length resolve to the earliest window."""
     if not members:
         return None
-    max_len = min(min(m.cap for m in members), (year_end - today).days + 1)
+    max_len = min(min(_as_cap(m.cap) for m in members), (year_end - today).days + 1)
     for length in range(max_len, 0, -1):
         w_start = today
         last_start = year_end - timedelta(days=length - 1)
