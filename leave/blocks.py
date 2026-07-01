@@ -1,6 +1,9 @@
 """Block Kit view builders."""
 
 import json
+from datetime import date
+
+from leave.leave_year import reset_date
 
 LEAVE_TYPES = ["sick", "vacation", "personal"]
 
@@ -811,11 +814,25 @@ def build_leave_limits_modal(policy):
     }
 
 
-def build_carry_over_modal(policy):
-    """Edit the vacation carry-over caps, pre-filled from the current central policy.
-    Carry-over can be turned off (checkbox); when off (max carry over 0) its field is
-    hidden. Max total is always shown. Rendered from the stored state at open,
-    re-rendered on toggle."""
+def _reset_date_input(policy, today):
+    """A datepicker for the leave-year reset date, pre-filled with this year's
+    occurrence of the stored month/day. Only the month and day are used on submit —
+    the year is ignored (the reset advances forward from today)."""
+    initial = reset_date(today.year, policy["reset_month"], policy["reset_day"]).isoformat()
+    return {
+        "type": "input",
+        "block_id": "reset_date",
+        "label": {"type": "plain_text", "text": "Leave-year reset date (month & day; year ignored)"},
+        "element": {"type": "datepicker", "action_id": "value", "initial_date": initial},
+    }
+
+
+def build_carry_over_modal(policy, today=None):
+    """Edit the vacation carry-over caps and the leave-year reset date, pre-filled from
+    the current central policy. Carry-over can be turned off (checkbox); when off (max
+    carry over 0) its field is hidden. Max total is always shown. Rendered from the
+    stored state at open, re-rendered on toggle."""
+    today = today or date.today()
     max_carry_over = policy["max_carry_over"]["vacation"]
     enabled = max_carry_over > 0
     blocks = [
@@ -830,6 +847,7 @@ def build_carry_over_modal(policy):
     blocks.append(
         _number_input("max_total", "Max total (vacation days)", policy["max_total"]["vacation"])
     )
+    blocks.append(_reset_date_input(policy, today))
     blocks.append(
         {
             "type": "context",

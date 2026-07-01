@@ -45,6 +45,25 @@ def leave_period(today, month, day):
     return last_reset(today, month, day), next_reset(today, month, day)
 
 
+def current_period(today, month, day, anchor=None, period_start=None):
+    """The `(start, end)` leave period containing `today`, honouring a stored
+    forward-only pin.
+
+    With no `anchor`, the plain recurrence around today (`leave_period`) — the
+    calendar year for 1 Jan. With a stored `anchor` (the pinned next reset) and its
+    `period_start`, the current period keeps that pinned `[start, anchor)` until
+    `today` reaches the anchor, then advances a year at a time aligned to
+    `(month, day)`. This is how a reset date changed mid-period stays forward-only:
+    the one-time stub/stretch period holds its original start, and every period after
+    the anchor is the regular recurrence."""
+    if anchor is None:
+        return leave_period(today, month, day)
+    start, end = period_start, anchor
+    while today >= end:
+        start, end = end, next_reset(end, month, day)
+    return start, end
+
+
 def reset_transition(today, current_end, new_month, new_day):
     """Compute the forward-only move to a new reset `(month, day)`.
 
@@ -68,13 +87,15 @@ def reset_transition(today, current_end, new_month, new_day):
     return new_end, kind
 
 
-def period_key(start, month, day):
+def period_key(start):
     """The stable key for the leave period beginning on `start`, used to store
-    carry-in uniquely per period. For the 1-Jan default it is the year string
-    (``"2026"``) — byte-compatible with existing stored `carry_in` keys, so an
-    untouched system needs no migration. For any other reset date it is the start
-    date's ISO string, which stays unique even when the one-time stub transition
-    puts two resets in the same calendar year (e.g. 1 Jan then 13 Apr 2026)."""
-    if (month, day) == (1, 1):
+    carry-in uniquely per period. A period that starts on 1 Jan keys to the year
+    string (``"2026"``) — byte-compatible with existing stored `carry_in` keys, so an
+    untouched system needs no migration; any other start keys to its ISO date. Keyed
+    by the start alone (not the current reset month/day), so a reset date changed
+    forward-only keeps the current period's existing key — its stored carry-in, and
+    thus the balance, doesn't shift — while two resets in one calendar year (a stub:
+    1 Jan then 13 Apr 2026) still key distinctly."""
+    if (start.month, start.day) == (1, 1):
         return str(start.year)
     return start.isoformat()

@@ -8,6 +8,8 @@ grant already covers reading it. An employee's own `allowances` map, when presen
 is a per-person *override*; absent it, balances read this policy.
 """
 
+from datetime import date
+
 POLICY_KEY = "__policy__"
 
 # Shipped baseline; an operator can override it without a redeploy by writing the
@@ -21,6 +23,11 @@ DEFAULT_POLICY = {
     # so an untouched policy behaves exactly as before.
     "reset_month": 1,
     "reset_day": 1,
+    # The forward-only pin set when the reset date is changed mid-period: the current
+    # period's end (next reset) and its held start. Absent (None) means no pin — the
+    # period is the plain recurrence around the reset month/day.
+    "reset_anchor": None,
+    "reset_period_start": None,
 }
 
 
@@ -29,8 +36,13 @@ def _ints(m):
     return {k: (int(v) if v is not None else None) for k, v in m.items()}
 
 
+def _to_date(v):
+    return date.fromisoformat(v) if v else None
+
+
 def get_policy(db):
-    """The central policy. Falls back to DEFAULT_POLICY when no item is set."""
+    """The central policy. Falls back to DEFAULT_POLICY when no item is set. The
+    reset-date pin is returned as `date`s (or None)."""
     item = db.employees.get_item(Key={"slack_user_id": POLICY_KEY}).get("Item")
     if item is None:
         return DEFAULT_POLICY
@@ -42,6 +54,8 @@ def get_policy(db):
         # Older items predate the reset date; default them to 1 Jan (calendar year).
         "reset_month": int(item.get("reset_month", DEFAULT_POLICY["reset_month"])),
         "reset_day": int(item.get("reset_day", DEFAULT_POLICY["reset_day"])),
+        "reset_anchor": _to_date(item.get("reset_anchor")),
+        "reset_period_start": _to_date(item.get("reset_period_start")),
     }
 
 
@@ -53,14 +67,23 @@ def set_policy(
     consecutive_limit=None,
     reset_month=None,
     reset_day=None,
+    reset_anchor=None,
+    reset_period_start=None,
 ):
-    """Write the central policy item. Omitted sections keep the shipped defaults.
-    The reset date is preserved when not given, so editing the caps or limits never
-    silently moves the leave year back to 1 Jan."""
-    if reset_month is None or reset_day is None:
-        current = get_policy(db)  # stored value, or the 1-Jan default when unseeded
-        reset_month = current["reset_month"] if reset_month is None else reset_month
-        reset_day = current["reset_day"] if reset_day is None else reset_day
+    """Write the central policy item. Omitted sections keep the shipped defaults. The
+    reset date and its forward-only pin are preserved when not given, so editing the
+    caps or limits never silently moves the leave year or clears the pin. `reset_anchor`
+    / `reset_period_start` accept a `date` (stored ISO); pass both when changing the
+    reset date, so the current period holds its start."""
+    current = get_policy(db)  # stored values, or the defaults when unseeded
+    if reset_month is None:
+        reset_month = current["reset_month"]
+    if reset_day is None:
+        reset_day = current["reset_day"]
+    if reset_anchor is None:
+        reset_anchor = current["reset_anchor"]
+    if reset_period_start is None:
+        reset_period_start = current["reset_period_start"]
     db.employees.put_item(
         Item={
             "slack_user_id": POLICY_KEY,
@@ -70,6 +93,8 @@ def set_policy(
             "consecutive_limit": consecutive_limit or DEFAULT_POLICY["consecutive_limit"],
             "reset_month": reset_month,
             "reset_day": reset_day,
+            "reset_anchor": reset_anchor.isoformat() if reset_anchor else None,
+            "reset_period_start": reset_period_start.isoformat() if reset_period_start else None,
         }
     )
 

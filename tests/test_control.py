@@ -91,21 +91,22 @@ def _leave_limits_view(sick, vacation, personal, consecutive, enforce_consecutiv
     }
 
 
-def _carry_over_view(max_carry_over, max_total, enable=True):
-    """A view_submission state payload matching build_carry_over_modal."""
-    return {
-        "state": {
-            "values": {
-                "max_carry_over": {"value": {"value": str(max_carry_over)}},
-                "max_total": {"value": {"value": str(max_total)}},
-                "enable_carry_over": {
-                    CARRY_OVER_TOGGLE_ACTION: {
-                        "selected_options": [{"value": "on"}] if enable else []
-                    }
-                },
+def _carry_over_view(max_carry_over, max_total, enable=True, reset_date=None):
+    """A view_submission state payload matching build_carry_over_modal. `reset_date`
+    (ISO string) fills the reset-date picker; omitted, the block is absent (an older
+    payload — the submit keeps the current reset date)."""
+    values = {
+        "max_carry_over": {"value": {"value": str(max_carry_over)}},
+        "max_total": {"value": {"value": str(max_total)}},
+        "enable_carry_over": {
+            CARRY_OVER_TOGGLE_ACTION: {
+                "selected_options": [{"value": "on"}] if enable else []
             }
-        }
+        },
     }
+    if reset_date is not None:
+        values["reset_date"] = {"value": {"selected_date": reset_date}}
+    return {"state": {"values": values}}
 
 
 def _seed_carry_2027(db, uid):
@@ -651,6 +652,138 @@ def test_carry_over_submit_recomputes_all_carry_in(db):
     assert get_policy(db)["max_carry_over"]["vacation"] == 3
     assert get_employee(db, "U_A")["carry_in"]["2027"] == 3
     assert get_employee(db, "U_B")["carry_in"]["2027"] == 3
+
+
+# --- Carry-over modal: leave-year reset date (#58) ---------------------------
+
+
+def _reset_note(client):
+    """The reset-date note DM text (from the ack path), or None."""
+    for c in client.chat_postMessage_calls:
+        if "reset date" in c["text"].lower():
+            return c["text"]
+    return None
+
+
+def test_carry_over_modal_shows_reset_date_prefilled(db):
+    set_policy(db, reset_month=4, reset_day=13)
+    client = FakeSlackClient()
+    open_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}, "trigger_id": "T"},
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,  # 2026-06-08
+    )
+    view = client.views_push_calls[0]["view"]
+    block = next(b for b in view["blocks"] if b.get("block_id") == "reset_date")
+    assert block["element"]["initial_date"] == "2026-04-13"  # this year's occurrence
+
+
+def test_carry_over_submit_rejects_non_admin(db):
+    set_policy(db)  # default 1 Jan
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_SOMEONE"}},
+        view=_carry_over_view(5, 15, reset_date="2026-09-01"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    p = get_policy(db)  # nothing applied: reset date untouched, no pin
+    assert (p["reset_month"], p["reset_day"]) == (1, 1)
+    assert p["reset_anchor"] is None
+
+
+def test_admin_submit_sets_anchor_to_upcoming_occurrence(db):
+    set_policy(db)  # default 1 Jan, TODAY = 2026-06-08
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, reset_date="2099-09-01"),  # only the month/day is used
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    p = get_policy(db)
+    assert (p["reset_month"], p["reset_day"]) == (9, 1)
+    assert p["reset_anchor"] == date(2026, 9, 1)  # earliest 1 Sep strictly after today
+    assert p["reset_period_start"] == date(2026, 1, 1)  # current period start pinned
+
+
+def test_admin_sees_a_stub_note_when_reset_moves_earlier(db):
+    set_policy(db)
+    client = FakeSlackClient()
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, reset_date="2026-09-01"),  # ahead this year -> stub
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    note = _reset_note(client)
+    assert note and "stub" in note and "2026-08-31" in note
+    assert "don't shift" in note.lower()
+
+
+def test_admin_sees_a_stretch_note_when_reset_moves_later(db):
+    set_policy(db)
+    client = FakeSlackClient()
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, reset_date="2026-04-13"),  # already passed -> stretch
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    note = _reset_note(client)
+    assert note and "stretch" in note and "2027-04-12" in note
+
+
+def test_leaving_reset_at_jan1_changes_nothing(db):
+    set_policy(db)  # default 1 Jan
+    client = FakeSlackClient()
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, reset_date="2030-01-01"),  # still 1 Jan
+        client=client,
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    p = get_policy(db)
+    assert (p["reset_month"], p["reset_day"]) == (1, 1)
+    assert p["reset_anchor"] is None  # no pin set
+    assert _reset_note(client) is None  # no reset note
+
+
+def test_reset_date_change_is_forward_only_no_balance_shift(db):
+    # A stub keeps the current period's start pinned, so an employee's remaining
+    # balance (usage taken through today) does not shift, and no past period is recomputed.
+    set_policy(db)  # default 1 Jan
+    upsert_employee(db, "U_A", "Alice", None)
+    rid = create_request(db, "U_A", "vacation", date(2026, 3, 2), date(2026, 3, 5), None)  # 4 wd, past
+    approve_request(db, rid)
+    before = remaining_balance(db, get_employee(db, "U_A"), "vacation", TODAY)  # 10 - 4 = 6
+    submit_carry_over(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_carry_over_view(5, 15, reset_date="2026-09-01"),  # stub, ends 2026-09-01
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+        today=TODAY,
+    )
+    after = remaining_balance(db, get_employee(db, "U_A"), "vacation", TODAY)
+    assert after == before == 6
 
 
 def test_recompute_all_carry_in_skips_policy_item(db):
