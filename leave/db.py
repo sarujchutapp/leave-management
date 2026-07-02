@@ -4,9 +4,18 @@ import os
 
 import boto3
 
+from leave.board import BOARD_KEY
+from leave.holidays import HOLIDAYS_KEY
+from leave.policy import POLICY_KEY
+
 EMPLOYEES_TABLE = os.environ.get("EMPLOYEES_TABLE", "leave_employees")
 REQUESTS_TABLE = os.environ.get("REQUESTS_TABLE", "leave_requests")
 BY_EMPLOYEE_INDEX = "by_employee"
+
+# The reserved rows that share the employees table (see ADR-0006): central policy,
+# the saved leave board, and the holidays map. They are not people, so every
+# whole-table walk skips them. Defined once here, next to the walk that uses it.
+RESERVED_KEYS = frozenset({POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY})
 
 
 class Db:
@@ -43,33 +52,34 @@ def get_employee(db, slack_user_id):
     return db.employees.get_item(Key={"slack_user_id": slack_user_id}).get("Item")
 
 
-def list_reports(db, manager_id):
-    """Employees whose manager is `manager_id` — the block-and-tell delete guard.
-    Scans the employees table; the reserved policy/board items have no manager_id
-    so they never match."""
-    reports, scan_kwargs = [], {}
+def iter_employees(db):
+    """Yield every real employee item, one at a time, paging through the whole
+    employees table and skipping the reserved rows. The single home for the
+    scan-and-paginate walk; callers filter or act on what it yields."""
+    scan_kwargs = {}
     while True:
         resp = db.employees.scan(**scan_kwargs)
-        reports += [i for i in resp["Items"] if i.get("manager_id") == manager_id]
+        for item in resp["Items"]:
+            if item["slack_user_id"] not in RESERVED_KEYS:
+                yield item
         if "LastEvaluatedKey" not in resp:
-            return reports
+            return
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+
+def list_reports(db, manager_id):
+    """Employees whose manager is `manager_id` — the block-and-tell delete guard."""
+    return [e for e in iter_employees(db) if e.get("manager_id") == manager_id]
 
 
 def employee_with_name(db, real_name, exclude_id=None):
     """The employee whose `real_name` matches (case-insensitive, trimmed), excluding
     `exclude_id` — used to keep names unique so manager approval tickets are
-    unambiguous. Returns the conflicting item or None. Scans the employees table;
-    reserved items (no real_name) never match a real name."""
+    unambiguous. Returns the conflicting item or None."""
     target = (real_name or "").strip().casefold()
-    scan_kwargs = {}
-    while True:
-        resp = db.employees.scan(**scan_kwargs)
-        for item in resp["Items"]:
-            if item["slack_user_id"] == exclude_id:
-                continue
-            if (item.get("real_name") or "").strip().casefold() == target:
-                return item
-        if "LastEvaluatedKey" not in resp:
-            return None
-        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    for item in iter_employees(db):
+        if item["slack_user_id"] == exclude_id:
+            continue
+        if (item.get("real_name") or "").strip().casefold() == target:
+            return item
+    return None

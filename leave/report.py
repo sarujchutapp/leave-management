@@ -16,20 +16,17 @@ from boto3.dynamodb.conditions import Key
 
 from leave.balance import request_days
 from leave.blocks import LEAVE_TYPES
-from leave.board import BOARD_KEY
 from leave.burnout import expiring_quota, longest_working_stretch, no_break_stretch
-from leave.db import get_employee
-from leave.holidays import HOLIDAYS_KEY, holidays_between
+from leave.db import get_employee, iter_employees
+from leave.holidays import holidays_between
 from leave.leave_year import leave_period
-from leave.policy import POLICY_KEY, get_policy
+from leave.policy import get_policy
 from leave.requests import (
     approved_weekdays_by_type_this_year,
     carry_in_for,
     remaining_balance,
     remaining_balances,
 )
-
-RESERVED = {POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY}
 HEADER = ["employee", "leave type", "used", "remaining", "carry-in"]
 HISTORY_HEADER = [
     "employee",
@@ -52,13 +49,7 @@ BURNOUT_HEADER = [
 
 
 def _all_employees(db):
-    items, scan_kwargs = [], {}
-    while True:
-        resp = db.employees.scan(**scan_kwargs)
-        items += [i for i in resp["Items"] if i["slack_user_id"] not in RESERVED]
-        if "LastEvaluatedKey" not in resp:
-            return items
-        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return list(iter_employees(db))
 
 
 def build_report_csv(db, today):

@@ -17,10 +17,11 @@ from botocore.exceptions import ClientError
 
 from leave.absence import continuous_absence
 from leave.balance import request_days
-from leave.board import BOARD_KEY, reset_board
-from leave.holidays import HOLIDAYS_KEY, holidays_between
+from leave.board import reset_board
+from leave.db import iter_employees
+from leave.holidays import holidays_between
 from leave.leave_year import current_period, next_reset, period_key, reset_date
-from leave.policy import POLICY_KEY, allowance_for, get_policy
+from leave.policy import allowance_for, get_policy
 
 logger = logging.getLogger(__name__)
 
@@ -190,19 +191,13 @@ def recompute_all_carry_in(db, year):
     """Rebuild every employee's stored `year` carry_in from their stored chain under
     the current policy caps — run after the carry-over caps change so persisted
     carry_in (which `max_carry_over` feeds) isn't left stale. Iterates the whole
-    employees table via Scan; the reserved policy/board items are skipped. Returns
-    the number of employees recomputed."""
-    count, scan_kwargs = 0, {}
-    while True:
-        resp = db.employees.scan(**scan_kwargs)
-        for item in resp["Items"]:
-            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY):
-                continue
-            recompute_carry_in(db, item, year)
-            count += 1
-        if "LastEvaluatedKey" not in resp:
-            return count
-        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    employees table; the reserved policy/board items are skipped. Returns the
+    number of employees recomputed."""
+    count = 0
+    for item in iter_employees(db):
+        recompute_carry_in(db, item, year)
+        count += 1
+    return count
 
 
 def _vacation_available(base, carry_in, max_total):
@@ -554,20 +549,12 @@ def _scan_all_requests(db):
 def _wipe_all_carry_in(db):
     """Strip stored carry_in from every employee — part of Clear's clean slate, so
     no per-person carried-over days survive (ADR-0009). Skips the reserved items."""
-    scan_kwargs = {}
-    while True:
-        resp = db.employees.scan(**scan_kwargs)
-        for item in resp["Items"]:
-            if item["slack_user_id"] in (POLICY_KEY, BOARD_KEY, HOLIDAYS_KEY):
-                continue
-            if "carry_in" in item:
-                db.employees.update_item(
-                    Key={"slack_user_id": item["slack_user_id"]},
-                    UpdateExpression="REMOVE carry_in",
-                )
-        if "LastEvaluatedKey" not in resp:
-            return
-        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    for item in iter_employees(db):
+        if "carry_in" in item:
+            db.employees.update_item(
+                Key={"slack_user_id": item["slack_user_id"]},
+                UpdateExpression="REMOVE carry_in",
+            )
 
 
 def clear_all_requests(db, calendar, sheets, today, client=None):
