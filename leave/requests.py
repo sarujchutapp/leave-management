@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 from leave.absence import continuous_absence
 from leave.balance import request_days
 from leave.board import reset_board
+from leave.carryover import roll_forward
 from leave.db import iter_employees
 from leave.holidays import holidays_between
 from leave.leave_year import current_period, next_reset, period_key, reset_date
@@ -156,16 +157,22 @@ def carry_in_for(db, employee, today, policy=None):
         cmap[cur_key] = 0  # first period ever seen — start of accrual
     else:
         s = max(_stored_start(k) for k in cmap)
-        ci = cmap[period_key(s)]
+        start_carry = cmap[period_key(s)]
+        # Period boundaries are pure date math; the vacation used in each is one
+        # query each. Gather both, then roll the carry forward in one pure step.
+        ends, used = [], []
         while s < cur_start:
             p_end = _next_period_start(s, month, day, anchor, period_start)  # this period's exclusive end
-            available = min(base + ci, max_total)
-            used = _approved_weekdays_in(
-                db, employee["slack_user_id"], "vacation", s, p_end - timedelta(days=1)
+            ends.append(p_end)
+            used.append(
+                _approved_weekdays_in(
+                    db, employee["slack_user_id"], "vacation", s, p_end - timedelta(days=1)
+                )
             )
-            ci = min(max(available - used, 0), max_carry)
-            cmap[period_key(p_end)] = ci
             s = p_end
+        rolled = roll_forward(base, max_carry, max_total, start_carry, used)
+        for p_end, ci in zip(ends, rolled):
+            cmap[period_key(p_end)] = ci
         cmap.setdefault(cur_key, 0)
 
     _persist_carry_in(db, employee, cmap)
