@@ -57,6 +57,7 @@ from leave.holidays import (
 )
 from leave.leave_year import current_period, leave_period, reset_transition
 from leave.optimizer import Member, group_break, top_breaks
+from leave.view_state import checkbox_on, date_str, option, text, user, users
 from leave.requests import (
     active_full_leave_ranges,
     approve_request,
@@ -130,12 +131,6 @@ def open_view_settings(ack, body, client, db, admin_ids):
 _ALLOWANCE_FIELDS = ("sick", "vacation", "personal")
 
 
-def _checkbox_on(values, block_id, action_id):
-    """Whether a single-option checkbox in a modal is ticked."""
-    selected = values.get(block_id, {}).get(action_id, {}).get("selected_options") or []
-    return len(selected) > 0
-
-
 def open_leave_limits(ack, body, client, db, admin_ids):
     """Leave limits button: re-checks admin, then pushes the modal pre-filled from
     the current central policy."""
@@ -179,15 +174,15 @@ def _parse_leave_limits(view, db):
     Carry-over modal, so it's checked here)."""
     values = view["state"]["values"]
     parsed, errors = {}, {}
-    for field in _ALLOWANCE_FIELDS:
-        n, err = _parse_int(values[field]["value"]["value"])
+    for field_id in _ALLOWANCE_FIELDS:
+        n, err = _parse_int(text(values, field_id))
         if err:
-            errors[field] = err
+            errors[field_id] = err
         else:
-            parsed[field] = n
+            parsed[field_id] = n
     consecutive = None
-    if _checkbox_on(values, "enforce_consecutive", CONSECUTIVE_TOGGLE_ACTION):
-        consecutive, err = _parse_int(values["consecutive_limit"]["value"]["value"])
+    if checkbox_on(values, "enforce_consecutive", CONSECUTIVE_TOGGLE_ACTION):
+        consecutive, err = _parse_int(text(values, "consecutive_limit"))
         if err:
             errors["consecutive_limit"] = err
     max_total = get_policy(db)["max_total"]["vacation"]
@@ -293,13 +288,13 @@ def _parse_carry_over(view, db):
     values = view["state"]["values"]
     policy = get_policy(db)
     parsed, errors = {}, {}
-    max_total, err = _parse_int(values["max_total"]["value"]["value"])
+    max_total, err = _parse_int(text(values, "max_total"))
     if err:
         errors["max_total"] = err
     else:
         parsed["max_total"] = max_total
-    if _checkbox_on(values, "enable_carry_over", CARRY_OVER_TOGGLE_ACTION):
-        mco, err = _parse_int(values["max_carry_over"]["value"]["value"])
+    if checkbox_on(values, "enable_carry_over", CARRY_OVER_TOGGLE_ACTION):
+        mco, err = _parse_int(text(values, "max_carry_over"))
         if err:
             errors["max_carry_over"] = err
         else:
@@ -307,7 +302,7 @@ def _parse_carry_over(view, db):
     else:
         parsed["max_carry_over"] = 0
     # Reset date (month/day; year ignored). Absent from older payloads -> keep current.
-    picked = values.get("reset_date", {}).get("value", {}).get("selected_date")
+    picked = date_str(values, "reset_date")
     if picked:
         d = date.fromisoformat(picked)
         parsed["reset_month"], parsed["reset_day"] = d.month, d.day
@@ -414,7 +409,7 @@ def open_clear(ack, body, client, admin_ids):
 
 
 def _clear_confirmed(view):
-    raw = view["state"]["values"]["confirm"]["value"].get("value")
+    raw = text(view["state"]["values"], "confirm")
     return (raw or "").strip() == CLEAR_CONFIRM_WORD
 
 
@@ -476,32 +471,22 @@ def open_holidays(ack, body, client, db, admin_ids, today=None):
 
 
 def _holiday_action(view):
-    return (
-        view["state"]["values"]
-        .get("holiday_action", {})
-        .get(HOLIDAYS_ACTION_SELECT, {})
-        .get("selected_option", {})
-        .get("value")
-        or "add"
-    )
+    return option(view["state"]["values"], "holiday_action", HOLIDAYS_ACTION_SELECT) or "add"
 
 
 def _parse_holiday_submission(view):
     """(date_or_None, label_or_None, remove_iso_or_None) from the holidays modal."""
     values = view["state"]["values"]
-    date_raw = values.get("holiday_date", {}).get("value", {}).get("selected_date")
+    date_raw = date_str(values, "holiday_date")
     d = _to_gregorian(date.fromisoformat(date_raw)) if date_raw else None
-    label = (values.get("holiday_label", {}).get("value", {}).get("value") or "").strip() or None
-    remove_opt = values.get("holiday_remove", {}).get("value", {}).get("selected_option")
-    remove = remove_opt.get("value") if remove_opt else None
+    label = (text(values, "holiday_label") or "").strip() or None
+    remove = option(values, "holiday_remove")
     return d, label, remove
 
 
 def _import_text(view):
     """The pasted holiday text from the import field, or "" when absent."""
-    return (
-        view["state"]["values"].get("holiday_import", {}).get("value", {}).get("value") or ""
-    )
+    return text(view["state"]["values"], "holiday_import") or ""
 
 
 def update_holidays_modal(ack, body, client, db, admin_ids, today=None):
@@ -606,9 +591,8 @@ def update_report_modal(ack, body, client, admin_ids):
 
 def _report_choice(view):
     values = view["state"]["values"]
-    report_type = values["report_type"][REPORT_TYPE_ACTION]["selected_option"]["value"]
-    # The person picker is a Slack user-picker, so the value is selected_user.
-    person = values.get("person", {}).get("value", {}).get("selected_user")
+    report_type = option(values, "report_type", REPORT_TYPE_ACTION)
+    person = user(values, "person")
     return report_type, person
 
 
@@ -706,7 +690,7 @@ def update_manage_modal(ack, body, client, admin_ids):
         return
     action = body["actions"][0]["selected_option"]["value"]
     values = body.get("view", {}).get("state", {}).get("values", {})
-    selected = _value(values, "employee").get("selected_user")
+    selected = user(values, "employee")
     client.views_update(
         view_id=body["view"]["id"], view=build_manage_employees_modal(action, selected_user=selected)
     )
@@ -728,16 +712,12 @@ def prefill_manage_employee(ack, body, client, db, admin_ids):
     )
 
 
-def _value(values, block_id):
-    return values.get(block_id, {}).get("value", {})
-
-
 def _parse_overrides(values):
     """(allowances-or-None, errors). Only the non-blank per-type fields are written,
     so a partial override falls back to central policy for the rest."""
     parsed, errors = {}, {}
     for leave_type in _OVERRIDE_TYPES:
-        raw = _value(values, f"override_{leave_type}").get("value")
+        raw = text(values, f"override_{leave_type}")
         if raw is None or raw.strip() == "":
             continue
         n, err = _parse_int(raw)
@@ -749,7 +729,7 @@ def _parse_overrides(values):
 
 
 def _manage_action(values):
-    return values.get("action", {}).get(MANAGE_ACTION_SELECT, {}).get("selected_option", {}).get("value")
+    return option(values, "action", MANAGE_ACTION_SELECT)
 
 
 def _is_bot(client, user_id):
@@ -816,8 +796,8 @@ def _manage_errors(values, client, db, target, action):
         _, errors = _parse_overrides(values)
         return errors
     # save (add / edit)
-    name = (_value(values, "name").get("value") or "").strip()
-    manager = _value(values, "manager").get("selected_user")
+    name = (text(values, "name") or "").strip()
+    manager = user(values, "manager")
     errors = {}
     if not name:
         errors["name"] = "Name is required."
@@ -845,7 +825,7 @@ def submit_manage_employees_ack(ack, body, view, client, db, admin_ids):
         ack()
         return
     values = view["state"]["values"]
-    target = _value(values, "employee").get("selected_user")
+    target = user(values, "employee")
     action = _manage_action(values)
     errors = _manage_errors(values, client, db, target, action)
     if errors:
@@ -865,7 +845,7 @@ def submit_manage_employees_apply(
     if not is_admin(body["user"]["id"], admin_ids):
         return
     values = view["state"]["values"]
-    target = _value(values, "employee").get("selected_user")
+    target = user(values, "employee")
     action = _manage_action(values)
     if _manage_errors(values, client, db, target, action):
         return
@@ -892,8 +872,8 @@ def submit_manage_employees_apply(
     # the new manager), so settle them and ask the employee to re-file; approved leave
     # is unaffected. Detected before the write so we can compare against the stored
     # manager.
-    name = (_value(values, "name").get("value") or "").strip()
-    manager = _value(values, "manager").get("selected_user")
+    name = (text(values, "name") or "").strip()
+    manager = user(values, "manager")
     existing = get_employee(db, target)
     manager_changed = existing is not None and existing["manager_id"] != manager
     upsert_employee(db, target, name, manager, allowances=None)
@@ -1035,7 +1015,7 @@ def _render_group_result(window):
 
 
 def _picked_users(view):
-    return view["state"]["values"]["people"]["value"].get("selected_users") or []
+    return users(view["state"]["values"], "people")
 
 
 def _has_bot_pick(client, view):
@@ -1218,15 +1198,14 @@ def _to_gregorian(d):
 
 def _parse_submission(view):
     values = view["state"]["values"]
-    leave_type = values["leave_type"]["value"]["selected_option"]["value"]
-    start = _to_gregorian(date.fromisoformat(values["start_date"]["value"]["selected_date"]))
+    leave_type = option(values, "leave_type")
+    start = _to_gregorian(date.fromisoformat(date_str(values, "start_date")))
     # End date is optional: blank means a single-day leave, so default it to start.
-    end_raw = values.get("end_date", {}).get("value", {}).get("selected_date")
+    end_raw = date_str(values, "end_date")
     end = _to_gregorian(date.fromisoformat(end_raw)) if end_raw else start
-    reason = values["reason"]["value"].get("value")
+    reason = text(values, "reason")
     # Half-day selector defaults to "full"; "morning"/"afternoon" mark a half day.
-    half_opt = values.get("half_day", {}).get("value", {}).get("selected_option") or {}
-    half = half_opt.get("value")
+    half = option(values, "half_day")
     if half == "full":
         half = None
     return leave_type, start, end, reason, half
@@ -1491,7 +1470,7 @@ def handle_decline_submit(ack, body, view, client, db):
     ack()
     meta = json.loads(view["private_metadata"])
     request_id = meta["request_id"]
-    reason = view["state"]["values"]["decline_reason"]["value"].get("value")
+    reason = text(view["state"]["values"], "decline_reason")
 
     request = get_request(db, request_id)
     if request is None:
@@ -1524,13 +1503,13 @@ def handle_decline_submit(ack, body, view, client, db):
             half=request.get("half"),
         ),
     )
-    text = (
+    msg = (
         f"Your {request['leave_type']} leave "
         f"{format_period(request['start_date'], request['end_date'], request.get('half'))} was declined."
     )
     if reason:
-        text += f" Reason: {reason}"
-    _notify(client, employee["slack_user_id"], text)
+        msg += f" Reason: {reason}"
+    _notify(client, employee["slack_user_id"], msg)
 
 
 def open_cancel_modal(ack, body, client, db, today=None):
@@ -1611,7 +1590,7 @@ def _early_return(db, calendar, client, sheets, request, today):
 def submit_cancel(ack, body, view, client, db, calendar, sheets=None, today=None):
     ack()
     today = today or date.today()
-    request_id = view["state"]["values"]["request"]["value"]["selected_option"]["value"]
+    request_id = option(view["state"]["values"], "request")
     request = get_request(db, request_id)
 
     if request is None:
