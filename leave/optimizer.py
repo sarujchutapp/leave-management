@@ -16,6 +16,8 @@ span is the resulting continuous absence those days create, bridges included.
 from collections import namedtuple
 from datetime import timedelta
 
+from leave.absence import continuous_absence, is_worked
+
 # A suggested break. `book_start`/`book_end` is the vacation range to file — the
 # only days that cost quota. `span_*` is the resulting continuous absence
 # (calendar days off in a row), including bridging weekends/holidays and any
@@ -29,14 +31,6 @@ def _as_cap(cap):
     """A None consecutive limit means the cap is disabled — an unbounded run
     (see validation.py, which treats None the same way)."""
     return float("inf") if cap is None else cap
-
-
-def _is_working(d, holidays, ranges):
-    """A day actually worked: a weekday that is neither holiday nor existing
-    full-day leave. Such a day bounds a continuous absence."""
-    if d.weekday() >= 5 or d in holidays:
-        return False
-    return not any(s <= d <= e for s, e in ranges)
 
 
 def _sort_key(brk):
@@ -56,12 +50,6 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, bl
         return []
     cap = _as_cap(cap)
 
-    def worked(d, b_start, b_end):
-        # Like _is_working, but the proposed booking also makes a day non-working.
-        if b_start <= d <= b_end:
-            return False
-        return _is_working(d, holidays, existing_ranges)
-
     def overlaps_existing(b_start, b_end):
         return any(s <= b_end and e >= b_start for s, e in existing_ranges)
 
@@ -71,7 +59,7 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, bl
         # Start on a working, non-blocked day: a leading weekend/holiday is already
         # non-working, so it would add nothing and only muddy the booked dates, and a
         # blocked date can't be booked at all.
-        if not _is_working(b_start, holidays, existing_ranges) or b_start in blocked_dates:
+        if not is_worked(b_start, holidays, existing_ranges) or b_start in blocked_dates:
             b_start += _ONE
             continue
 
@@ -81,7 +69,7 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, bl
         while b_end <= year_end and (b_end - b_start).days < cap:
             if overlaps_existing(b_start, b_end) or b_end in blocked_dates:
                 break
-            ends_on_working = _is_working(b_end, holidays, existing_ranges)
+            ends_on_working = is_worked(b_end, holidays, existing_ranges)
             if ends_on_working:
                 cost += 1
             if cost > balance:
@@ -89,12 +77,9 @@ def _all_candidates(today, year_end, balance, holidays, existing_ranges, cap, bl
             # Only consider candidates that end on a working day (a trailing
             # weekend/holiday would be a non-canonical framing of a shorter booking).
             if ends_on_working:
-                span_start, span_end = b_start, b_end
-                while not worked(span_start - _ONE, b_start, b_end):
-                    span_start -= _ONE
-                while not worked(span_end + _ONE, b_start, b_end):
-                    span_end += _ONE
-                span_days = (span_end - span_start).days + 1
+                span_start, span_end, span_days = continuous_absence(
+                    b_start, b_end, holidays, existing_ranges
+                )
                 if span_days <= cap:
                     candidates.append(
                         LeaveBreak(b_start, b_end, cost, span_start, span_end, span_days)
@@ -171,38 +156,20 @@ def _member_can_be_off(member, w_start, w_end, holidays):
     cost = 0
     d = w_start
     while d <= w_end:
-        if d.weekday() < 5 and d not in holidays and not _in_ranges(d, member.existing_ranges):
+        if is_worked(d, holidays, member.existing_ranges):
             cost += 1
         d += _ONE
     if cost > member.balance:
         return False
 
-    def worked(d):
-        if w_start <= d <= w_end:
-            return False
-        if d.weekday() >= 5 or d in holidays:
-            return False
-        return not _in_ranges(d, member.existing_ranges)
-
-    run_start, run_end, guard = w_start, w_end, 0
-    while guard < 400 and not worked(run_start - _ONE):
-        run_start -= _ONE
-        guard += 1
-    guard = 0
-    while guard < 400 and not worked(run_end + _ONE):
-        run_end += _ONE
-        guard += 1
-    return (run_end - run_start).days + 1 <= _as_cap(member.cap)
-
-
-def _in_ranges(d, ranges):
-    return any(s <= d <= e for s, e in ranges)
+    _, _, run = continuous_absence(w_start, w_end, holidays, member.existing_ranges)
+    return run <= _as_cap(member.cap)
 
 
 def _has_working_day(w_start, w_end, holidays):
     d = w_start
     while d <= w_end:
-        if d.weekday() < 5 and d not in holidays:
+        if is_worked(d, holidays):
             return True
         d += _ONE
     return False
