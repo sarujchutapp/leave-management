@@ -77,13 +77,16 @@ The full step-by-step runbook is **[SETUP.md](SETUP.md)**. In short:
 | `lambda_handler.py` | **Production** entrypoint — the AWS Lambda `handler` (Slack HTTP mode). Fetches secrets from SSM on cold start and writes the Google key to `/tmp`. |
 | `leave/handlers.py` | Slack handler logic (open / submit / approve / decline / cancel) as plain functions, so tests can pass fakes. On Lambda the slow submit/approve/cancel work runs as lazy listeners (post-ack). |
 | `leave/blocks.py` | Block Kit builders for the modals (incl. the half-day selector), the manager approval ticket, and decision notices; `format_period` shows the half. |
+| `leave/view_state.py` | Reader for the Slack view-submission envelope — the one place that knows the `state.values` shape the form parsers read. |
 | `leave/validation.py` | Request validation — dates, overlap, remaining balance, half-day rules, and the consecutive-absence limit. |
 | `leave/balance.py` | Day counting: weekdays, holiday-aware, half-day (`0.5`). |
+| `leave/absence.py` | Pure continuous-absence math — the worked-day predicate and the run extension, shared by the validator and the optimizer. |
+| `leave/carryover.py` | Pure vacation carry-over roll-forward (the cap arithmetic from ADR-0004); no DB. |
 | `leave/policy.py` | Central leave policy (base allowances + caps) as a reserved item; allowance resolution with per-employee override. |
-| `leave/requests.py` | Leave-request persistence (DynamoDB), derived balances, lazy vacation carry-in, and the consecutive-absence calc. |
+| `leave/requests.py` | Leave-request persistence (DynamoDB) and derived balances; drives lazy vacation carry-in and the consecutive-absence calc (the pure math lives in `carryover.py` / `absence.py`). |
 | `leave/holidays.py` | Holidays store + CSV apply + the holiday-set queries day-counting uses (degrades to "no holidays" if unprovisioned). |
 | `leave/board.py` | The shared leave board — denormalized state + renders the Google Sheet + posts the Slack link. |
-| `leave/db.py` | DynamoDB connection handle (employees / requests / holidays) + employee lookup. |
+| `leave/db.py` | DynamoDB connection handle (employees / requests / holidays), employee lookup, and the `iter_employees` whole-table walk (skips reserved rows). |
 | `leave/calendar_client.py` | Thin wrapper over the Google Calendar API; per-person event colours. |
 | `leave/sheets_client.py` | Thin wrapper over the Google Sheets API; renders the leave-board grid. |
 | `leave/seed.py` | Provision the tables (used by tests and initial setup), seed the central policy + **proxy** employees. |
