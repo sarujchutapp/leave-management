@@ -782,6 +782,20 @@ def _settle_in_flight_leave(
     return pending
 
 
+def _effective_save_fields(values, db, target):
+    """Name + manager for a save. A prefilled field the admin never touched isn't
+    re-submitted by Slack (an initial_value/initial_user set on a views.update), so it
+    arrives empty; for an existing employee that means "unchanged" — fall back to their
+    stored value rather than treat it as cleared. Returns (name, manager, existing)."""
+    name = (text(values, "name") or "").strip()
+    manager = user(values, "manager")
+    existing = get_employee(db, target) if target else None
+    if existing:
+        name = name or (existing.get("real_name") or "")
+        manager = manager or existing.get("manager_id")
+    return name, manager, existing
+
+
 def _manage_errors(values, client, db, target, action):
     """Inline-error validation shared by the ack and apply phases (empty dict = valid).
     Delete is block-and-tell (a person still managing anyone is rejected naming those
@@ -796,8 +810,7 @@ def _manage_errors(values, client, db, target, action):
         _, errors = _parse_overrides(values)
         return errors
     # save (add / edit)
-    name = (text(values, "name") or "").strip()
-    manager = user(values, "manager")
+    name, manager, _ = _effective_save_fields(values, db, target)
     errors = {}
     if not name:
         errors["name"] = "Name is required."
@@ -872,9 +885,7 @@ def submit_manage_employees_apply(
     # the new manager), so settle them and ask the employee to re-file; approved leave
     # is unaffected. Detected before the write so we can compare against the stored
     # manager.
-    name = (text(values, "name") or "").strip()
-    manager = user(values, "manager")
-    existing = get_employee(db, target)
+    name, manager, existing = _effective_save_fields(values, db, target)
     manager_changed = existing is not None and existing["manager_id"] != manager
     upsert_employee(db, target, name, manager, allowances=None)
     _notify(client, body["user"]["id"], f"✅ Saved {name} (<@{target}>).")

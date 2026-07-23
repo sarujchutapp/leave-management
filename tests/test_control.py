@@ -1452,6 +1452,44 @@ def test_manage_edit_can_keep_own_name(db):
     assert get_employee(db, "U_E")["manager_id"] == "U_MGR2"
 
 
+def test_manage_edit_keeps_prefilled_name_when_untouched(db):
+    # Slack doesn't re-submit an initial_value/initial_user the admin never touched, so
+    # an edit that leaves the prefilled name and manager alone arrives empty. For an
+    # existing employee that means "unchanged" — fall back to their stored values rather
+    # than reject with "Name is required".
+    upsert_employee(db, "U_E", "Eve", "U_MGR")
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name=None, manager=None),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response == {"response_action": "clear"}  # not a "name required" error
+    emp = get_employee(db, "U_E")
+    assert emp["real_name"] == "Eve"  # kept
+    assert emp["manager_id"] == "U_MGR"  # kept
+
+
+def test_manage_add_still_requires_name_for_new_person(db):
+    # The unchanged-prefill fallback is only for an existing employee; a brand-new
+    # person with an empty name is still rejected (there's nothing stored to fall back to).
+    ack = FakeAck()
+    submit_manage_employees(
+        ack=ack,
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_NEW", action="save", name=None, manager="U_BOSS"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert ack.response["response_action"] == "errors"
+    assert "name" in ack.response["errors"]
+    assert get_employee(db, "U_NEW") is None
+
+
 def test_manage_rejects_bot_as_employee(db):
     client = FakeSlackClient()
     client.bot_users = {"U_APP"}  # the leave-management app / Slackbot
