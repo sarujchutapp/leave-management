@@ -54,7 +54,7 @@ def create_tables():
     waiter.wait(TableName=db.REQUESTS_TABLE)
 
 
-def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=None):
+def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=None, approval=None):
     """Create or update an employee. A field-level update (not a put_item), so it
     only writes the identity fields it owns and never clobbers other attributes on
     the row — notably the vacation `carry_in` that leave/requests.py persists there.
@@ -62,12 +62,20 @@ def upsert_employee(db, slack_user_id, real_name, manager_id=None, allowances=No
     Allowances are a per-person override only; absent, balances read the central
     policy (see leave/policy.py). Pass `allowances` to set the override; omit it
     (None) to leave any existing override unchanged — it is not written by default.
+
+    Approval (`auto` / `approval-needed`) is the per-employee approval mode. Like
+    allowances it is written only when passed; omit it (None) to leave any existing
+    value unchanged — absent, the resolver derives today's behavior, so there is no
+    backfill.
     """
     set_clauses = ["real_name = :n", "manager_id = :m"]
     values = {":n": real_name, ":m": manager_id}
     if allowances is not None:
         set_clauses.append("allowances = :a")
         values[":a"] = allowances
+    if approval is not None:
+        set_clauses.append("approval = :ap")
+        values[":ap"] = approval
     db.employees.update_item(
         Key={"slack_user_id": slack_user_id},
         UpdateExpression="SET " + ", ".join(set_clauses),

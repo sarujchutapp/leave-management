@@ -21,3 +21,16 @@ def test_null_manager_is_preserved(db):
     upsert_employee(db, "U_BOSS", "Boss", None)
     emp = get_employee(db, "U_BOSS")
     assert emp["manager_id"] is None
+
+
+def test_approval_round_trips(db):
+    upsert_employee(db, "U_A", "Alice", None, approval="approval-needed")
+    assert get_employee(db, "U_A")["approval"] == "approval-needed"
+    upsert_employee(db, "U_A", "Alice", None, approval="auto")
+    assert get_employee(db, "U_A")["approval"] == "auto"
+
+
+def test_approval_absent_by_default(db):
+    # No backfill: an employee written without an approval carries no such field.
+    upsert_employee(db, "U_A", "Alice", None)
+    assert "approval" not in get_employee(db, "U_A")

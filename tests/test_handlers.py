@@ -1,10 +1,22 @@
 from datetime import date
 
 from leave.blocks import LEAVE_CALLBACK_ID, LEAVE_TYPES
-from leave.handlers import CONTACT_ADMIN, open_leave_modal, submit_leave
-from leave.requests import approve_request, cancellable_requests, create_request
+from leave.handlers import (
+    CONTACT_ADMIN,
+    handle_approve,
+    open_leave_modal,
+    resolve_approval_mode,
+    submit_leave,
+)
+from leave.requests import approve_request, cancellable_requests, create_request, get_request
 from leave.seed import upsert_employee
-from tests.fakes import FakeAck, FakeCalendar, FakeSlackClient, make_leave_view
+from tests.fakes import (
+    FakeAck,
+    FakeCalendar,
+    FakeSlackClient,
+    make_action_body,
+    make_leave_view,
+)
 
 TODAY = date(2026, 6, 8)
 
@@ -19,6 +31,22 @@ def _persisted(db, employee_id):
     list; returns None when nothing was persisted."""
     rows = cancellable_requests(db, employee_id, TODAY)
     return rows[0] if rows else None
+
+
+def test_resolver_uses_stored_approval():
+    # A stored value wins outright, regardless of the manager relationship.
+    assert resolve_approval_mode({"slack_user_id": "U_A", "manager_id": "U_B", "approval": "auto"}) == "auto"
+    assert (
+        resolve_approval_mode({"slack_user_id": "U_A", "manager_id": None, "approval": "approval-needed"})
+        == "approval-needed"
+    )
+
+
+def test_resolver_derives_default_when_absent():
+    # No stored approval: preserve today's _self_approves rule.
+    assert resolve_approval_mode({"slack_user_id": "U_A", "manager_id": None}) == "auto"
+    assert resolve_approval_mode({"slack_user_id": "U_A", "manager_id": "U_A"}) == "auto"
+    assert resolve_approval_mode({"slack_user_id": "U_A", "manager_id": "U_B"}) == "approval-needed"
 
 
 def test_registered_user_opens_modal_with_balances(db):
@@ -138,6 +166,95 @@ def test_submit_auto_approves_when_employee_is_their_own_manager(db):
     row = _persisted(db, "U_SOLO")
     assert row["status"] == "approved"
     # self-notify only — no approval ticket (blocks) routed anywhere
+    assert len(client.chat_postMessage_calls) == 1
+    assert client.chat_postMessage_calls[0]["channel"] == "U_SOLO"
+    assert "blocks" not in client.chat_postMessage_calls[0]
+    assert len(calendar.created) == 1
+
+
+def test_submit_auto_mode_skips_ticket_for_distinct_manager(db):
+    # approval=auto on a report with a real manager: auto-approve, no ticket.
+    upsert_employee(db, "U_BOSS", "Boss", None)
+    upsert_employee(db, "U_ALICE", "Alice", "U_BOSS", approval="auto")
+    client = FakeSlackClient()
+    calendar = FakeCalendar()
+    view = make_leave_view("vacation", "2026-06-10", "2026-06-11")
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ALICE"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=calendar,
+        today=TODAY,
+    )
+
+    row = _persisted(db, "U_ALICE")
+    assert row["status"] == "approved"
+    # self-notify only — no ticket routed to the manager
+    assert len(client.chat_postMessage_calls) == 1
+    assert client.chat_postMessage_calls[0]["channel"] == "U_ALICE"
+    assert "blocks" not in client.chat_postMessage_calls[0]
+    assert len(calendar.created) == 1
+
+
+def test_submit_approval_needed_own_manager_routes_proxy_ticket(db):
+    # approval=approval-needed with the employee as their own manager: a proxy ticket
+    # routed to them, which they can then action themselves.
+    upsert_employee(db, "U_SOLO", "Solo", "U_SOLO", approval="approval-needed")
+    client = FakeSlackClient()
+    calendar = FakeCalendar()
+    view = make_leave_view("vacation", "2026-06-10", "2026-06-11")
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=calendar,
+        today=TODAY,
+    )
+
+    row = _persisted(db, "U_SOLO")
+    assert row["status"] == "pending"
+    # ticket DM'd to themselves, with the Approve/Decline blocks
+    assert len(client.chat_postMessage_calls) == 1
+    assert client.chat_postMessage_calls[0]["channel"] == "U_SOLO"
+    assert client.chat_postMessage_calls[0].get("blocks")
+    assert calendar.created == []
+
+    # proxy: the employee approves their own ticket (clicker == manager_id)
+    handle_approve(
+        ack=FakeAck(),
+        body=make_action_body(row["request_id"], "U_SOLO"),
+        client=client,
+        db=db,
+        calendar=calendar,
+    )
+    assert get_request(db, row["request_id"])["status"] == "approved"
+
+
+def test_submit_no_manager_auto_approves_even_if_approval_needed(db):
+    # No approver to route to: auto-approve regardless of the stored mode.
+    upsert_employee(db, "U_SOLO", "Solo", None, approval="approval-needed")
+    client = FakeSlackClient()
+    calendar = FakeCalendar()
+    view = make_leave_view("vacation", "2026-06-10", "2026-06-11")
+
+    submit_leave(
+        ack=FakeAck(),
+        body={"user": {"id": "U_SOLO"}},
+        view=view,
+        client=client,
+        db=db,
+        calendar=calendar,
+        today=TODAY,
+    )
+
+    row = _persisted(db, "U_SOLO")
+    assert row["status"] == "approved"
     assert len(client.chat_postMessage_calls) == 1
     assert client.chat_postMessage_calls[0]["channel"] == "U_SOLO"
     assert "blocks" not in client.chat_postMessage_calls[0]

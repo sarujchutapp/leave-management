@@ -1239,10 +1239,33 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     return True
 
 
+def resolve_approval_mode(employee):
+    """The request's approval mode for this employee: `auto` (skip the ticket) or
+    `approval-needed` (route a ticket). Reads the stored `approval` when present;
+    when the field is absent, derives it to preserve today's behavior — `auto` for a
+    self-managed or no-manager employee, `approval-needed` otherwise (the old
+    `_self_approves` rule). No backfill of existing records."""
+    stored = employee.get("approval")
+    if stored in ("auto", "approval-needed"):
+        return stored
+    if employee["manager_id"] is None or employee["manager_id"] == employee["slack_user_id"]:
+        return "auto"
+    return "approval-needed"
+
+
+def _auto_approves(employee):
+    """Whether a submitted request approves immediately rather than routing a ticket:
+    the resolved mode is `auto`, or there is simply no approver to route to
+    (`manager_id` is None). A no-manager employee always auto-approves, whatever the
+    stored mode. The one home for the auto-vs-ticket rule."""
+    return employee["manager_id"] is None or resolve_approval_mode(employee) == "auto"
+
+
 def _self_approves(employee):
     """No separate approver — top of chain. True when the employee has no manager,
     or is listed as their own manager (which an admin can set via Manage employees).
-    Either way their requests auto-approve rather than routing a ticket to anyone."""
+    Used to gate FYI notices to a real, distinct manager; the auto-vs-ticket routing
+    lives in `_auto_approves`."""
     return employee["manager_id"] is None or employee["manager_id"] == employee["slack_user_id"]
 
 
@@ -1294,8 +1317,8 @@ def submit_leave_apply(body, view, client, db, calendar, sheets=None, today=None
         db, employee["slack_user_id"], leave_type, start, end, reason, half
     )
 
-    # Top of chain (no manager, or their own manager): auto-approve.
-    if _self_approves(employee):
+    # Auto mode, or no approver to route to: auto-approve rather than send a ticket.
+    if _auto_approves(employee):
         if not _finalize_approval(db, calendar, request_id, employee, leave_type, start, end, half):
             return
         _notify(
