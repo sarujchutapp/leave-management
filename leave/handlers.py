@@ -7,6 +7,7 @@ injects ack/body/view/client/logger by parameter name.
 import json
 from datetime import date, timedelta
 
+from leave.approval import resolve_approval_mode
 from leave.blocks import (
     CARRY_OVER_TOGGLE_ACTION,
     CLEAR_CONFIRM_WORD,
@@ -783,17 +784,23 @@ def _settle_in_flight_leave(
 
 
 def _effective_save_fields(values, db, target):
-    """Name + manager for a save. A prefilled field the admin never touched isn't
-    re-submitted by Slack (an initial_value/initial_user set on a views.update), so it
-    arrives empty; for an existing employee that means "unchanged" — fall back to their
-    stored value rather than treat it as cleared. Returns (name, manager, existing)."""
+    """Name + manager + approval for a save. A prefilled field the admin never touched
+    isn't re-submitted by Slack (an initial_value/initial_user/initial_option set on a
+    views.update), so it arrives empty; for an existing employee that means "unchanged"
+    — fall back to their stored (or, for approval, derived) value rather than treat it
+    as cleared. A new person's untouched approval falls back to `approval-needed`.
+    Returns (name, manager, approval, existing)."""
     name = (text(values, "name") or "").strip()
     manager = user(values, "manager")
+    approval = option(values, "approval")
     existing = get_employee(db, target) if target else None
     if existing:
         name = name or (existing.get("real_name") or "")
         manager = manager or existing.get("manager_id")
-    return name, manager, existing
+        approval = approval or resolve_approval_mode(existing)
+    else:
+        approval = approval or "approval-needed"
+    return name, manager, approval, existing
 
 
 def _manage_errors(values, client, db, target, action):
@@ -810,7 +817,7 @@ def _manage_errors(values, client, db, target, action):
         _, errors = _parse_overrides(values)
         return errors
     # save (add / edit)
-    name, manager, _ = _effective_save_fields(values, db, target)
+    name, manager, _, _ = _effective_save_fields(values, db, target)
     errors = {}
     if not name:
         errors["name"] = "Name is required."
@@ -885,9 +892,9 @@ def submit_manage_employees_apply(
     # the new manager), so settle them and ask the employee to re-file; approved leave
     # is unaffected. Detected before the write so we can compare against the stored
     # manager.
-    name, manager, existing = _effective_save_fields(values, db, target)
+    name, manager, approval, existing = _effective_save_fields(values, db, target)
     manager_changed = existing is not None and existing["manager_id"] != manager
-    upsert_employee(db, target, name, manager, allowances=None)
+    upsert_employee(db, target, name, manager, allowances=None, approval=approval)
     _notify(client, body["user"]["id"], f"✅ Saved {name} (<@{target}>).")
     if manager_changed:
         withdrawn = _settle_in_flight_leave(
@@ -1237,20 +1244,6 @@ def _finalize_approval(db, calendar, request_id, employee, leave_type, start, en
     event_id = calendar.create_event(summary, start, end, color_id)
     set_calendar_event_id(db, request_id, event_id)
     return True
-
-
-def resolve_approval_mode(employee):
-    """The request's approval mode for this employee: `auto` (skip the ticket) or
-    `approval-needed` (route a ticket). Reads the stored `approval` when present;
-    when the field is absent, derives it to preserve today's behavior — `auto` for a
-    self-managed or no-manager employee, `approval-needed` otherwise (the old
-    `_self_approves` rule). No backfill of existing records."""
-    stored = employee.get("approval")
-    if stored in ("auto", "approval-needed"):
-        return stored
-    if employee["manager_id"] is None or employee["manager_id"] == employee["slack_user_id"]:
-        return "auto"
-    return "approval-needed"
 
 
 def _auto_approves(employee):

@@ -14,6 +14,7 @@ from leave.blocks import (
     LEAVE_LIMITS_CALLBACK_ID,
     MANAGE_ACTION_SELECT,
     MANAGE_EMPLOYEES_CALLBACK_ID,
+    build_manage_employees_modal,
     REPORT_ACTION,
     REPORT_CALLBACK_ID,
     REPORT_TYPE_ACTION,
@@ -129,14 +130,17 @@ def _seed_approved_with_event(db, emp_id, event_id):
     return rid
 
 
-def _manage_view(employee, action="save", name=None, manager=None, overrides=None):
-    """A view_submission state payload matching build_manage_employees_modal."""
+def _manage_view(employee, action="save", name=None, manager=None, overrides=None, approval=None):
+    """A view_submission state payload matching build_manage_employees_modal. An
+    `approval` of None models an untouched select (Slack omits it), so the submit
+    falls back to the stored/derived value."""
     overrides = overrides or {}
     values = {
         "employee": {"value": {"selected_user": employee}},
         "action": {MANAGE_ACTION_SELECT: {"selected_option": {"value": action}}},
         "name": {"value": {"value": name}},
         "manager": {"value": {"selected_user": manager}},
+        "approval": {"value": {"selected_option": {"value": approval}} if approval else {}},
     }
     for t in ("sick", "vacation", "personal"):
         values[f"override_{t}"] = {
@@ -1369,6 +1373,39 @@ def _pick_body(selected_user, action="save"):
     }
 
 
+def test_manage_modal_approval_select_defaults_for_new(db):
+    # A brand-new person (no employee record): the approval select shows both options
+    # and defaults to approval-needed, next to the manager picker.
+    view = build_manage_employees_modal("save")
+    blocks = {b.get("block_id"): b for b in view["blocks"]}
+    assert "approval" in blocks
+    element = blocks["approval"]["element"]
+    assert element["type"] == "static_select"
+    assert {o["value"] for o in element["options"]} == {"auto", "approval-needed"}
+    assert element["initial_option"]["value"] == "approval-needed"
+
+
+def test_manage_modal_approval_prefills_stored_value_on_edit(db):
+    upsert_employee(db, "U_E", "Eve", "U_MGR", approval="auto")
+    client = FakeSlackClient()
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_E"), client=client, db=db, admin_ids=ADMINS)
+    blocks = {b.get("block_id"): b for b in client.views_update_calls[0]["view"]["blocks"]}
+    assert blocks["approval"]["element"]["initial_option"]["value"] == "auto"
+
+
+def test_manage_modal_approval_prefills_derived_default_when_unstored(db):
+    # No stored approval: the select shows the resolver's derived default.
+    upsert_employee(db, "U_E", "Eve", "U_MGR")  # distinct manager -> approval-needed
+    upsert_employee(db, "U_T", "Top", "U_T")  # own manager -> auto
+    client = FakeSlackClient()
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_E"), client=client, db=db, admin_ids=ADMINS)
+    prefill_manage_employee(ack=FakeAck(), body=_pick_body("U_T"), client=client, db=db, admin_ids=ADMINS)
+    eve = {b.get("block_id"): b for b in client.views_update_calls[0]["view"]["blocks"]}
+    top = {b.get("block_id"): b for b in client.views_update_calls[1]["view"]["blocks"]}
+    assert eve["approval"]["element"]["initial_option"]["value"] == "approval-needed"
+    assert top["approval"]["element"]["initial_option"]["value"] == "auto"
+
+
 def test_manage_employee_pick_prefills_current_values(db):
     # Picking a registered employee re-renders the modal with their current name,
     # manager, and selection filled in (so "edit" shows what you're editing).
@@ -1418,6 +1455,35 @@ def test_manage_add_creates_employee(db):
     assert emp["real_name"] == "Newbie"
     assert emp["manager_id"] == "U_BOSS"
     assert "allowances" not in emp  # add/edit no longer sets an override
+
+
+def test_manage_save_persists_approval(db):
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_NEW", action="save", name="Newbie", manager="U_BOSS", approval="auto"),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    assert get_employee(db, "U_NEW")["approval"] == "auto"
+
+
+def test_manage_edit_keeps_stored_approval_when_untouched(db):
+    # Leaving the approval select untouched on an edit (Slack omits it) keeps the
+    # stored value, alongside the existing untouched name/manager fallback.
+    upsert_employee(db, "U_E", "Eve", "U_MGR", approval="auto")
+    submit_manage_employees(
+        ack=FakeAck(),
+        body={"user": {"id": "U_ADMIN"}},
+        view=_manage_view("U_E", action="save", name=None, manager=None, approval=None),
+        client=FakeSlackClient(),
+        db=db,
+        admin_ids=ADMINS,
+    )
+    emp = get_employee(db, "U_E")
+    assert emp["approval"] == "auto"  # kept
+    assert emp["real_name"] == "Eve" and emp["manager_id"] == "U_MGR"  # untouched fix still holds
 
 
 def test_manage_rejects_duplicate_name(db):
