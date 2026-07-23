@@ -3,6 +3,7 @@
 import json
 from datetime import date
 
+from leave.approval import resolve_approval_mode
 from leave.leave_year import reset_date
 
 LEAVE_TYPES = ["sick", "vacation", "personal"]
@@ -920,6 +921,11 @@ _MANAGE_ACTIONS = [
     {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
 ]
 
+_APPROVAL_OPTIONS = [
+    {"text": {"type": "plain_text", "text": "auto"}, "value": "auto"},
+    {"text": {"type": "plain_text", "text": "approval-needed"}, "value": "approval-needed"},
+]
+
 
 def build_manage_employees_modal(action="save", selected_user=None, employee=None):
     """Add/edit, set an allowance override, or delete an employee. The Action select
@@ -971,6 +977,10 @@ def build_manage_employees_modal(action="save", selected_user=None, employee=Non
         }
         if employee and employee.get("manager_id"):
             manager_element["initial_user"] = employee["manager_id"]
+        # Prefill the approval select from the resolver — the stored mode on edit, or
+        # the derived default when none is stored; approval-needed for a new person.
+        approval = resolve_approval_mode(employee) if employee else "approval-needed"
+        approval_option = next(o for o in _APPROVAL_OPTIONS if o["value"] == approval)
         blocks += [
             {
                 "type": "input",
@@ -988,6 +998,22 @@ def build_manage_employees_modal(action="save", selected_user=None, employee=Non
                     "(their leave auto-approves).",
                 },
                 "element": manager_element,
+            },
+            {
+                "type": "input",
+                "block_id": "approval",
+                "label": {"type": "plain_text", "text": "Approval"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "auto: leave approves on submit. approval-needed: routes a ticket "
+                    "to the manager (themselves if top of chain).",
+                },
+                "element": {
+                    "type": "static_select",
+                    "action_id": "value",
+                    "initial_option": approval_option,
+                    "options": _APPROVAL_OPTIONS,
+                },
             },
         ]
     elif action == "override":
