@@ -39,7 +39,8 @@ are tracked automatically.
 **Stack:** Python · Slack Bolt · AWS Lambda · DynamoDB · Terraform · Google Calendar & Sheets APIs · pytest / moto
 
 **Docs:** [User manual](docs/USER_MANUAL.md) · [Software documentation](docs/SOFTWARE_DOCUMENTATION.md) ·
-[Setup & deploy runbook](SETUP.md) · [What I learned](docs/what-i-learned.md)
+[Setup & deploy runbook](SETUP.md) · [What I learned](docs/what-i-learned.md) ·
+[Presentation slides (PDF)](docs/presentation/Presentation_Leave_Management.pdf)
 
 ## How it works
 
