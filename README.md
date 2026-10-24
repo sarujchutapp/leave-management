@@ -1,20 +1,45 @@
-# leave-management
+# Leave Management — a Slack leave bot
 
-A Slack bot for requesting and approving employee leave. Employees run `/dayoff` to
-request time off, managers approve or decline from a Slack message, and approved leave
-lands on a shared Google Calendar. Balances are tracked per leave type (sick / vacation /
-personal).
+Request, approve, and track employee leave without leaving Slack. One slash command
+replaces the "DM your manager, they note it down by hand" loop: the manager approves with
+one click, approved leave lands on a shared Google Calendar and leave board, and balances
+are tracked automatically.
 
-Runs **scale-to-zero** on AWS Lambda (Slack HTTP mode) behind a Function URL, with
-DynamoDB for storage — roughly **$0/month** at low usage.
+> Built during my Data Scientist internship at **Toyota Tsusho Mobility Informatics Pte. Ltd.**
+> (Jun–Jul 2026). I designed and built it end to end — requirements, architecture, AWS
+> deployment, and tests.
 
-**V2** adds: **half-days** (morning/afternoon), **vacation carry-over** with company-wide
-caps, a **maximum consecutive-absence** limit, a central **leave policy** (allowances +
-caps in one place), **per-person calendar colours**, and a shared **leave board** — a
-Google Sheet grid the bot keeps current, with Slack posting a link when it changes.
-Company **holidays** are modelled too (currently deferred in production — see Notes). The
-domain vocabulary lives in [`CONTEXT.md`](CONTEXT.md); the carry-over model is
-[ADR-0004](docs/adr/0004-carry-over-balance-model.md).
+| Request leave | Leave Optimizer | Admin control plane | Leave limits |
+|:-:|:-:|:-:|:-:|
+| ![Request leave modal](docs/images/request-leave.png) | ![Leave Optimizer](docs/images/leave-optimizer.png) | ![Admin control menu](docs/images/admin-control.png) | ![Leave limits settings](docs/images/leave-limits.png) |
+
+## Features
+
+| Command | Who | What it does |
+|---|---|---|
+| `/dayoff` | Everyone | Request sick / vacation / personal leave, full or half day. The manager gets a one-click Approve / Decline card showing who else is out; people at the top of the chain are auto-approved. |
+| `/dayoff-cancel` | Everyone | Cancel a pending or future request, or return early from leave in progress — only the days actually taken are charged. |
+| `/advance` | Everyone | **Leave Optimizer** — finds the longest breaks your remaining days can buy, using weekends and public holidays as free bridges; can also find a window a group of teammates can all take off. Book straight from the card. |
+| `/burnout` | Managers | Direct reports ranked by burnout risk (longest stretch without a break), with remaining vacation, an expiring-quota flag, and a one-click supportive nudge. |
+| `/control` | Admins | Admin control plane inside Slack: leave limits, carry-over and leave-year reset date, holidays (add / remove / bulk import), CSV reports, employee management, and a guarded reset. |
+
+## Engineering highlights
+
+- **Serverless, scale-to-zero** — AWS Lambda (Slack HTTP mode) + DynamoDB on-demand,
+  roughly **$0/month** at low usage; a keep-warm ping avoids cold-start Slack timeouts
+  ([ADR-0007](docs/adr/0007-keep-warm-ping.md)).
+- **Infrastructure as code** — Terraform, least-privilege IAM (the deploy role can't read
+  leave data), secrets in SSM SecureString ([ADR-0003](docs/adr/0003-terraform-deploy-ssm-secrets.md)).
+- **376 offline tests** — pytest + [`moto`](https://github.com/getmoto/moto) and fakes for
+  Slack and Google, so the full suite needs no cloud access.
+- **Decisions written down** — 10 [ADRs](docs/adr/), a domain glossary
+  ([`CONTEXT.md`](CONTEXT.md)), and 42 issue specs in [`issues/done/`](issues/done/),
+  each built as a thin end-to-end slice.
+
+**Stack:** Python · Slack Bolt · AWS Lambda · DynamoDB · Terraform · Google Calendar & Sheets APIs · pytest / moto
+
+**Docs:** [User manual](docs/USER_MANUAL.md) · [Software documentation](docs/SOFTWARE_DOCUMENTATION.md) ·
+[Setup & deploy runbook](SETUP.md) · [What I learned](docs/what-i-learned.md)
 
 ## How it works
 
