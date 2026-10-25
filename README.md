@@ -5,7 +5,7 @@ replaces the "DM your manager, they note it down by hand" loop: the manager appr
 one click, approved leave lands on a shared Google Calendar and leave board, and balances
 are tracked automatically.
 
-> Built during my Data Scientist internship at **Toyota Tsusho Mobility Informatics Pte. Ltd.**
+> Built during my data science internship
 > (Jun–Jul 2026). I designed and built it end to end — requirements, architecture, AWS
 > deployment, and tests.
 
